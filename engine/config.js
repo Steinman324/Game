@@ -1,0 +1,88 @@
+export const Config = {
+  // Canvas
+  WIDTH: 640,
+  HEIGHT: 480,
+  HALF_HEIGHT: 240,
+
+  // Player
+  PLAYER_SPEED: 3.0,
+  PLAYER_ROT_SPEED: 2.5,
+  MOUSE_SENSITIVITY: 0.002,
+  PLAYER_RADIUS: 0.25,
+  PLAYER_START_X: 2.5,
+  PLAYER_START_Y: 2.5,
+  PLAYER_START_ANGLE: 0,
+  PLAYER_MAX_HEALTH: 100,
+  PLAYER_START_AMMO: 50,
+
+  // FOV
+  FOV: 0.66, // camera plane length (66 degree FOV)
+
+  // Rendering
+  WALL_SHADE_SIDE: 0.7, // Y-side wall darkening factor
+  FLOOR_COLOR: '#1a1a1a',
+  CEILING_COLOR: '#111111',
+  MAX_DEPTH: 20,
+
+  // Textures
+  TEX_SIZE: 64,
+
+  // Doors
+  DOOR_OPEN_SPEED: 2.0,
+  DOOR_OPEN_TIME: 3.0,    // seconds before auto-close
+  DOOR_TRIGGER_DIST: 1.5,
+
+  // Enemies
+  ENEMY_SPEED: 1.5,
+  ENEMY_ATTACK_RANGE: 1.2,
+  ENEMY_ATTACK_DAMAGE: 10,
+  ENEMY_ATTACK_COOLDOWN: 1.0,
+  ENEMY_ALERT_DIST: 8.0,
+  ENEMY_LOSE_DIST: 12.0,
+  ENEMY_HEALTH: 30,
+  ENEMY_SPRITE_SIZE: 0.7,
+
+  // Weapons
+  GUN_DAMAGE: 25,
+  GUN_COOLDOWN: 0.4,
+
+  // HUD
+  MINIMAP_SCALE: 4,
+  MINIMAP_X: 10,
+  MINIMAP_Y: 10,
+  HEALTH_BAR_X: 10,
+  HEALTH_BAR_Y: 450,
+
+  // Timing
+  DELTA_CAP: 0.1,
+
+  // Map
+  MAP_WIDTH: 24,
+  MAP_HEIGHT: 24,
+
+  // Cell types
+  CELL_EMPTY: 0,
+  CELL_WALL: 1,
+  CELL_DOOR: 2,
+
+  // Door states
+  DOOR_CLOSED: 0,
+  DOOR_OPENING: 1,
+  DOOR_OPEN: 2,
+  DOOR_CLOSING: 3,
+
+  // Enemy states
+  ENEMY_IDLE: 0,
+  ENEMY_ALERT: 1,
+  ENEMY_CHASE: 2,
+  ENEMY_ATTACK: 3,
+  ENEMY_DEAD: 4,
+
+  // Game states
+  STATE_LOADING: 'LOADING',
+  STATE_MENU: 'MENU',
+  STATE_PLAYING: 'PLAYING',
+  STATE_PAUSED: 'PAUSED',
+  STATE_GAME_OVER: 'GAME_OVER',
+  STATE_WIN: 'WIN',
+};
