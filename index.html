@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPERATION VEIL</title>
+<!--
+  ============================================================================
+  OPERATION VEIL — single-file first-person 3D mystery game
+  ============================================================================
+  ARCHITECTURE
+  - Rendering: Three.js r128 WebGL renderer (PCFSoftShadowMap)
+  - Game loop: requestAnimationFrame with delta time, capped at Config.DELTA_CAP (100ms)
+  - Libraries: Three.js r128 from cdnjs.cloudflare.com only
+  - State machine: BOOT -> MENU -> BRIEFING -> PLAYING -> PAUSED -> INVENTORY
+                   -> CODEX -> WIN -> RESTART
+  - All mutable state lives in GameState; tuning constants in Config.
+  - Input lives in InputState; listeners registered once at init.
+  Known limitations:
+  - No mobile support, no save system, single player.
+  - No dynamic shadow casting on instanced meshes.
+  - PointerLock requires HTTPS/localhost in some browsers; we never auto-capture.
+  ============================================================================
+-->
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#000;
+    font-family:'Courier New',monospace; color:#cfcabb; }
+  #gameCanvas { display:block; position:absolute; top:0; left:0; }
+
+  /* ----- Overlay layers ----- */
+  .screen { position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; z-index:50; }
+  .hidden { display:none !important; }
+
+  /* ----- Vignette ----- */
+  #vignette { position:absolute; inset:0; z-index:10; pointer-events:none;
+    background:radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.75) 100%); }
+
+  /* ----- HUD ----- */
+  #hud { position:absolute; inset:0; z-index:20; pointer-events:none; }
+  #crosshair { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); }
+  #roomName { position:absolute; top:24px; left:28px; font-size:20px; letter-spacing:4px;
+    color:#d4a820; text-shadow:0 0 8px rgba(212,168,32,.6); opacity:0; transition:opacity 1s; }
+  #codexCounter { position:absolute; top:24px; right:28px; font-size:14px; letter-spacing:2px;
+    color:#9aa0a8; }
+  #heldItem { position:absolute; bottom:24px; left:28px; font-size:15px; color:#bfc4b0; }
+  #prompt { position:absolute; bottom:38px; left:50%; transform:translateX(-50%);
+    font-size:15px; color:#e8e2cf; text-shadow:0 0 6px #000; background:rgba(10,10,12,.45);
+    padding:6px 14px; border:1px solid rgba(212,168,32,.4); border-radius:3px; opacity:0;
+    transition:opacity .2s; }
+  #hudMsg { position:absolute; top:50%; left:50%; transform:translate(-50%,-120px);
+    font-size:16px; color:#d46060; letter-spacing:3px; opacity:0; transition:opacity .4s;
+    text-shadow:0 0 8px #000; }
+
+  /* ----- Notifications ----- */
+  #notify { position:absolute; top:70px; right:28px; z-index:30; }
+  .notif { background:rgba(20,24,20,.92); border:1px solid #d4a820; color:#d4a820;
+    padding:10px 16px; margin-bottom:8px; font-size:13px; letter-spacing:3px;
+    box-shadow:0 0 16px rgba(212,168,32,.3); animation:slideIn .4s ease; }
+  @keyframes slideIn { from{transform:translateX(60px);opacity:0;} to{transform:none;opacity:1;} }
+
+  /* ----- Menu / Briefing / Win shared ----- */
+  .bigtitle { font-size:64px; letter-spacing:14px; color:#d4a820; font-weight:bold;
+    text-shadow:0 0 24px rgba(212,168,32,.5); margin-bottom:14px;
+    font-family:'Arial Black','Impact',sans-serif; }
+  .subtitle { font-size:17px; letter-spacing:6px; color:#7c8088; margin-bottom:46px; }
+  .vbtn { background:transparent; border:2px solid #d4a820; color:#d4a820; padding:14px 38px;
+    font-size:17px; letter-spacing:5px; cursor:pointer; font-family:'Courier New',monospace;
+    transition:all .2s; margin:8px; }
+  .vbtn:hover { background:#d4a820; color:#0a0a0c; box-shadow:0 0 24px rgba(212,168,32,.6); }
+  #menu { background:radial-gradient(ellipse at center,#15140f 0%,#000 80%); }
+  #briefing { background:#05060a; }
+  .terminalbox { width:680px; max-width:90%; border:1px solid #2a4030; background:rgba(8,14,10,.96);
+    padding:32px 36px; color:#8fd49a; font-size:14px; line-height:1.8; box-shadow:0 0 40px rgba(40,120,60,.15); }
+  .terminalbox h2 { color:#d4a820; letter-spacing:4px; margin-bottom:18px; font-size:18px; }
+  .redacted { background:#1a1a1a; color:#1a1a1a; user-select:none; }
+  #win { background:radial-gradient(ellipse at center,#1a0f0f 0%,#000 80%); }
+  .wintext { width:640px; max-width:90%; text-align:center; color:#b6aa93; font-size:16px;
+    line-height:2; margin-bottom:40px; }
+
+  /* ----- Pause ----- */
+  #pause { background:rgba(0,0,0,.82); }
+  #pause h2 { color:#d4a820; letter-spacing:8px; font-size:28px; margin-bottom:30px; }
+  #controlsBox { max-width:520px; color:#9aa0a8; font-size:14px; line-height:2; text-align:left;
+    border:1px solid #333; padding:20px 28px; background:rgba(10,12,14,.9); margin-top:18px; }
+
+  /* ----- Inventory ----- */
+  #inventory { background:rgba(4,6,8,.94); z-index:60; }
+  .inv-wrap { display:flex; gap:40px; align-items:flex-start; }
+  .inv-grid { display:grid; grid-template-columns:repeat(4,70px); grid-template-rows:repeat(4,70px);
+    gap:10px; }
+  .inv-slot { width:70px; height:70px; border:1px solid #3a3a3a; background:rgba(20,22,24,.8);
+    display:flex; align-items:center; justify-content:center; font-size:30px; cursor:pointer;
+    position:relative; transition:border-color .15s; }
+  .inv-slot.filled { border-color:#5a5a48; }
+  .inv-slot.filled:hover { border-color:#d4a820; box-shadow:0 0 12px rgba(212,168,32,.4); }
+  .inv-slot .link { position:absolute; top:2px; right:4px; font-size:11px; color:#d4a820; }
+  .inv-panel { width:360px; min-height:430px; border:1px solid #333; background:rgba(12,14,16,.92);
+    padding:22px; }
+  .inv-panel h3 { color:#d4a820; letter-spacing:2px; margin-bottom:10px; font-size:18px; }
+  .inv-panel p { color:#a8ac9c; font-size:13px; line-height:1.7; }
+  #examineCanvas { display:block; margin:16px auto; border:1px solid #2a2a2a; background:#08080a; }
+  .inv-title { color:#d4a820; letter-spacing:6px; font-size:22px; margin-bottom:24px; }
+  .inv-hint { position:absolute; bottom:26px; color:#666; font-size:12px; letter-spacing:3px; }
+
+  /* ----- Codex ----- */
+  #codex { background:rgba(4,6,8,.95); z-index:60; flex-direction:column; }
+  .codex-title { color:#d4a820; letter-spacing:6px; font-size:22px; margin-bottom:6px; }
+  .codex-sub { color:#666; font-size:12px; letter-spacing:3px; margin-bottom:24px; }
+  .codex-list { display:flex; flex-wrap:wrap; gap:14px; justify-content:center; max-width:900px; }
+  .codex-card { width:260px; border:1px solid #333; background:rgba(14,16,18,.9); padding:16px;
+    text-align:left; }
+  .codex-card.locked { opacity:.4; }
+  .codex-card .ch { color:#d4a820; font-size:15px; letter-spacing:2px; margin-bottom:8px; }
+  .codex-card .ct { color:#9da294; font-size:12px; line-height:1.7; min-height:90px; }
+
+  /* ----- Terminal popup (server personnel file) ----- */
+  #termPopup { position:absolute; inset:0; z-index:65; display:flex; align-items:center;
+    justify-content:center; background:rgba(0,0,0,.85); }
+  .termWin { width:560px; max-width:90%; background:#04100a; border:1px solid #2a6a3a;
+    color:#7fe89a; font-size:14px; line-height:1.9; padding:28px 32px; box-shadow:0 0 40px rgba(40,160,80,.25); }
+  .termWin h3 { color:#d4ff90; letter-spacing:3px; margin-bottom:14px; }
+  .blink { animation:blink 1s steps(2,start) infinite; }
+  @keyframes blink { 50%{opacity:0;} }
+
+  /* ----- Readable popup (logbook) ----- */
+  #readPopup { position:absolute; inset:0; z-index:65; display:flex; align-items:center;
+    justify-content:center; background:rgba(0,0,0,.85); }
+  .readWin { width:560px; max-width:90%; background:#1c160e; border:1px solid #5a4a2a;
+    color:#d8c9a8; font-size:14px; line-height:1.9; padding:30px 36px; box-shadow:0 0 40px rgba(0,0,0,.6); }
+  .readWin h3 { color:#d4a820; letter-spacing:3px; margin-bottom:14px; }
+  .readWin .pager { margin-top:18px; display:flex; justify-content:space-between; }
+  .smbtn { background:transparent; border:1px solid #5a4a2a; color:#d4a820; padding:6px 16px;
+    cursor:pointer; font-family:inherit; }
+  .smbtn:hover { background:#d4a820; color:#1c160e; }
+
+  #loading { position:absolute; inset:0; z-index:100; display:flex; align-items:center;
+    justify-content:center; background:#000; color:#d4a820; letter-spacing:6px; font-size:18px; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="vignette" class="hidden"></div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <svg id="crosshair" width="22" height="22" viewBox="0 0 22 22">
+    <circle id="chDot" cx="11" cy="11" r="3" fill="#ffffff"/>
+    <circle cx="11" cy="11" r="9" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="1"/>
+  </svg>
+  <div id="roomName"></div>
+  <div id="codexCounter">ENTRIES: 0 / 8</div>
+  <div id="heldItem"></div>
+  <div id="prompt"></div>
+  <div id="hudMsg"></div>
+</div>
+<div id="notify"></div>
+
+<!-- Loading -->
+<div id="loading">INITIALIZING&hellip;</div>
+
+<!-- Menu -->
+<div id="menu" class="screen hidden">
+  <div class="bigtitle">OPERATION VEIL</div>
+  <div class="subtitle">INVESTIGATE &nbsp; DISCOVER &nbsp; UNDERSTAND</div>
+  <button class="vbtn" id="beginBtn">BEGIN OPERATION</button>
+</div>
+
+<!-- Briefing -->
+<div id="briefing" class="screen hidden">
+  <div class="terminalbox">
+    <h2>// MISSION BRIEFING — CLEARANCE 4</h2>
+    <p>OPERATOR. You are dispatched to decommissioned listening post <b>VEIL-7</b>,
+    grid reference <span class="redacted">██████████</span>.</p>
+    <p>The facility reported <span class="redacted">████████</span> at 0300 local. All personnel
+    are <span class="redacted">██████████████</span>. Command considers the site cold.</p>
+    <p>Your objective: catalogue recovered materials, recover all <b>three access keycards</b>,
+    and determine what occurred in <b>Room 7 (Anomaly Chamber)</b>.</p>
+    <p>Note: temporal and instrument anomalies have been reported. Trust your <span class="redacted">████</span>.
+    Do not <span class="redacted">██████████</span> the mirror in Room 7.</p>
+    <p style="margin-top:16px;color:#d4a820;">Eight classified observations await. Find them all.</p>
+  </div>
+  <button class="vbtn" id="continueBtn" style="margin-top:32px;">CONTINUE</button>
+</div>
+
+<!-- Pause -->
+<div id="pause" class="screen hidden">
+  <h2>PAUSED</h2>
+  <button class="vbtn" id="resumeBtn">RESUME</button>
+  <button class="vbtn" id="ctrlBtn">CONTROLS</button>
+  <button class="vbtn" id="quitBtn">QUIT TO MENU</button>
+  <div id="controlsBox" class="hidden">
+    WASD — Move &nbsp;&nbsp; MOUSE — Look<br>
+    SHIFT — Crouch &nbsp;&nbsp; E — Interact<br>
+    TAB — Inventory &nbsp;&nbsp; C — Codex<br>
+    F — Flashlight &nbsp;&nbsp; G — Drop held item<br>
+    ESC — Pause / Release pointer
+  </div>
+</div>
+
+<!-- Inventory -->
+<div id="inventory" class="screen hidden">
+  <div class="inv-title">INVENTORY</div>
+  <div class="inv-wrap">
+    <div class="inv-grid" id="invGrid"></div>
+    <div class="inv-panel" id="invPanel">
+      <h3 id="invName">&mdash;</h3>
+      <canvas id="examineCanvas" width="200" height="200"></canvas>
+      <p id="invDesc">Select an item to examine.</p>
+    </div>
+  </div>
+  <div class="inv-hint">TAB or ESC to close</div>
+</div>
+
+<!-- Codex -->
+<div id="codex" class="screen hidden">
+  <div class="codex-title">CODEX</div>
+  <div class="codex-sub" id="codexSub">CLASSIFIED OBSERVATIONS</div>
+  <div class="codex-list" id="codexList"></div>
+  <div class="inv-hint">C or ESC to close</div>
+</div>
+
+<!-- Win -->
+<div id="win" class="screen hidden">
+  <div class="bigtitle">OPERATION VEIL</div>
+  <div class="wintext" id="winText"></div>
+  <button class="vbtn" id="restartBtn">RESTART</button>
+</div>
+
+<!-- Terminal popup -->
+<div id="termPopup" class="hidden">
+  <div class="termWin">
+    <h3>VEIL-7 // PERSONNEL RECORD</h3>
+    <div id="termBody"></div>
+    <div style="margin-top:20px;"><button class="smbtn" id="termClose">CLOSE</button></div>
+  </div>
+</div>
+
+<!-- Readable popup -->
+<div id="readPopup" class="hidden">
+  <div class="readWin">
+    <h3 id="readTitle">LOGBOOK</h3>
+    <div id="readBody"></div>
+    <div class="pager">
+      <button class="smbtn" id="readPrev">&lt; PREV</button>
+      <span id="readPage" style="color:#8a7a5a;"></span>
+      <button class="smbtn" id="readNext">NEXT &gt;</button>
+    </div>
+    <div style="margin-top:14px;text-align:center;">
+      <button class="smbtn" id="readClose">CLOSE</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+(function(){
+
+// ===========================================================================
+// CONFIG & STATE
+// ===========================================================================
+const Config = {
+  PLAYER_SPEED: 4.0, CROUCH_SPEED: 1.8, PLAYER_HEIGHT: 1.7, CROUCH_HEIGHT: 1.0,
+  INTERACT_RANGE: 2.5, DELTA_CAP: 0.1, HEAD_BOB_FREQ: 2.0, HEAD_BOB_AMP: 0.04,
+  FOG_DENSITY_NORMAL: 0.04, FOG_DENSITY_ANOMALY: 0.12, GRAVITY: -12.0,
+};
+
+let GameState = null;
+function freshState(){
+  return {
+    phase: 'BOOT',
+    player: { pos: new THREE.Vector3(0, 1.7, 3), rot: {yaw: Math.PI, pitch: 0},
+      velocity: new THREE.Vector3(), crouching:false, flashlightOn:false, onGround:true,
+      heldId:null },
+    inventory: [], discovered: new Set(), codex: [],
+    world: { doors:{}, terminals:{}, anomalyClockWatched:0, anomalyDoorOpen:false,
+      mirrorTimer:0, logbookPage:0, photoRevealed:0, allKeycardsFound:false,
+      currentRoom:'entry', compassWarned:false, kovacsTone:false, secretPassageOpen:false,
+      headBob:0, footTimer:0 },
+    time: { elapsed:0, delta:0 },
+    audio: { ctx:null, masterGain:null, drones:{}, activeDrone:null, morseNext:8 }
+  };
+}
+
+// Input
+const InputState = { keys:{}, mouseDX:0, mouseDY:0, locked:false, pressed:{} };
+
+// Three.js globals (allowed)
+let scene, camera, renderer, raycaster;
+let flashlight, flashTarget;
+let lastTime = 0;
+
+// Object registries
+let itemMeshes = {};      // id -> {mesh, def, baseY}
+let interactables = [];   // {type, mesh, id, ...}
+let animObjects = { floatShapes:[], serverLEDs:[], flickerLights:[], clockHand:null,
+  coin:null, uvText:null, secretDoor:null, mirrorSymbol:null, photoMesh:null,
+  projectorCanvas:null, projectorTex:null };
+
+// ===========================================================================
+// WALKABLE & COLLISION
+// ===========================================================================
+let WALKABLE = [];
+function resetWalkable(){
+  WALKABLE = [
+    {name:'entry', minX:-4.8, maxX:4.8, minZ:-4.8, maxZ:4.8},
+    {name:'corr_eo', minX:-2, maxX:2, minZ:-11.4, maxZ:-4.0},
+    {name:'ops', minX:-6.8, maxX:6.8, minZ:-25, maxZ:-10.6},
+    {name:'corr_os', minX:6.6, maxX:11.4, minZ:-20, maxZ:-16},
+    {name:'server', minX:11, maxX:21, minZ:-24, maxZ:-12},
+    {name:'corr_sa', minX:14, maxX:18, minZ:-28.4, maxZ:-23.6},
+    {name:'anomaly', minX:10, maxX:22, minZ:-40, maxZ:-28},
+    {name:'corr_oa', minX:-11.4, maxX:-6.6, minZ:-20, maxZ:-16},
+    {name:'archive', minX:-21, maxX:-11, minZ:-24, maxZ:-12},
+    {name:'corr_ao', minX:-18, maxX:-14, minZ:-29.4, maxZ:-23.6},
+    {name:'obs', minX:-22, maxX:-10, minZ:-39, maxZ:-28.6},
+  ];
+}
+const furnitureColliders = []; // {minX,maxX,minZ,maxZ}
+
+function isWalkable(x,z,r=0.3){
+  // A point is in a zone if it lies within the zone shrunk by r on the
+  // OUTER boundary only. To avoid seam gaps between adjacent zones, we treat
+  // the union: shrink each zone but allow the point if it is inside ANY zone's
+  // shrunk box OR within r of a shared border with another zone. Simplest
+  // robust approach: a point is walkable if it is inside the union of all
+  // zones expanded by 0 and not within r of any OUTER (non-shared) wall.
+  // Implementation: inside any zone shrunk by r, OR inside any zone fully and
+  // also inside a neighbouring zone fully (seam), keeps corridors passable.
+  let inZone=false;
+  for(const w of WALKABLE){
+    if(x>=w.minX+r && x<=w.maxX-r && z>=w.minZ+r && z<=w.maxZ-r){ inZone=true; break; }
+  }
+  if(!inZone){
+    // seam check: inside two raw zones at once means we are at a shared border
+    let count=0;
+    for(const w of WALKABLE){
+      if(x>=w.minX && x<=w.maxX && z>=w.minZ && z<=w.maxZ) count++;
+      if(count>=2){ inZone=true; break; }
+    }
+  }
+  if(!inZone) return false;
+  for(const f of furnitureColliders){
+    if(x>=f.minX-r && x<=f.maxX+r && z>=f.minZ-r && z<=f.maxZ+r) return false;
+  }
+  return true;
+}
+
+function currentRoomAt(x,z){
+  for(const w of WALKABLE){
+    if(x>=w.minX && x<=w.maxX && z>=w.minZ && z<=w.maxZ){
+      if(w.name.startsWith('corr')) continue;
+      return w.name;
+    }
+  }
+  // fallback to corridors
+  for(const w of WALKABLE){
+    if(x>=w.minX && x<=w.maxX && z>=w.minZ && z<=w.maxZ) return GameState.world.currentRoom;
+  }
+  return GameState.world.currentRoom;
+}
+
+// ===========================================================================
+// ITEM & CODEX DEFINITIONS
+// ===========================================================================
+const ITEM_DEFS = [
+  {id:'radio', name:'Radio (Broken)', icon:'📻', pos:[3,0.9,-1],
+   desc:'Standard-issue field radio. The receiver hums with static. Occasionally, fragments of something coded.',
+   color:0x4a4a3a, emissive:0x2a2a1a, room:'entry'},
+  {id:'dogtags', name:'Dog Tags', icon:'🏷', pos:[-3,1.1,-22],
+   desc:'Steel chain. SGT. R. KOVACS. Blood type O+. The name matches the photo in the archive.',
+   color:0x888878, emissive:0x444438, room:'ops'},
+  {id:'keycard1', name:'Level 1 Keycard', icon:'⬛', pos:[4,1.1,-16],
+   desc:'Green stripe. ACCESS: RESTRICTED LEVEL 1. Someone left it on a desk.',
+   color:0x40c040, emissive:0x206020, room:'ops'},
+  {id:'keycard2', name:'Level 2 Keycard', icon:'⬛', pos:[14,1.0,-22],
+   desc:'Yellow stripe. ACCESS: RESTRICTED LEVEL 2. One corner slightly melted.',
+   color:0xd0c020, emissive:0x686010, room:'server'},
+  {id:'keycard3', name:'Level 3 Keycard', icon:'⬛', pos:[18,1.0,-36],
+   desc:'Red stripe. ACCESS: CLASSIFIED LEVEL 3. Cold to the touch.',
+   color:0xd02020, emissive:0x681010, room:'anomaly'},
+  {id:'logbook', name:'Logbook', icon:'📒', pos:[0,1.0,-18],
+   desc:'A field logbook. Mundane entries for months. The final three entries are not mundane.',
+   color:0x4a3830, emissive:0x201810, room:'ops', readable:true},
+  {id:'compass', name:'Compass', icon:'🧭', pos:[2,1.1,-24],
+   desc:'Magnetic compass. The needle always points the same direction regardless of orientation: toward Room 7.',
+   color:0x705040, emissive:0x382820, room:'server'},
+  {id:'mirror', name:'Signal Mirror', icon:'🔲', pos:[-16,1.1,-18],
+   desc:'Military-issue signal mirror. Engraved handle: DO NOT USE IN ROOM 7.',
+   color:0xc0c0b0, emissive:0x606058, room:'archive'},
+  {id:'coin', name:'Strange Coin', icon:'◎', pos:[16,1.6,-36],
+   desc:'Metallic. Circular. No markings. It weighs nothing. You have checked three times.',
+   color:0xd0c080, emissive:0x907040, room:'anomaly', hovering:true},
+  {id:'patch', name:'Uniform Patch', icon:'⬡', pos:[-14,1.1,-22],
+   desc:'Partial unit insignia. The emblem is cut in half. The other half is somewhere in Room 7.',
+   color:0x5a5040, emissive:0x2a2818, room:'archive'},
+  {id:'ration', name:'Ration Tin (Expired 1987)', icon:'🥫', pos:[13,1.0,-16],
+   desc:'Field ration, BB: OCT 1987. Something rattles inside. Contains a note in an unknown script.',
+   color:0x606850, emissive:0x303428, room:'server', openable:true},
+  {id:'powercell', name:'Power Cell', icon:'⚡', pos:[18,1.0,-20],
+   desc:'High-capacity power cell. Still holds partial charge. Compatible with older terminals.',
+   color:0x304060, emissive:0x182030, room:'server'},
+  {id:'photo', name:'Blank Photograph', icon:'🖼', pos:[-15,1.4,-20],
+   desc:'No image. The emulsion feels warm. As if something is trying to form.',
+   color:0xd0c8a0, emissive:0x686440, room:'archive'},
+  {id:'disk', name:'Encrypted Disk', icon:'💿', pos:[16,1.1,-15],
+   desc:'5.25" floppy disk. Label: PERSONNEL — CIPHER REQUIRED. Surface is scratched.',
+   color:0x303038, emissive:0x18181c, room:'server'},
+  {id:'anomaly_patch', name:'Patch (Other Half)', icon:'⬡', pos:[11,1.0,-35],
+   desc:'The missing half of the insignia. The two pieces fit. The image they form is wrong.',
+   color:0x5a5040, emissive:0x2a2818, room:'anomaly'},
+];
+
+const CODEX_DEFS = [
+  {id:'map_secret', title:'Coordinates Behind the Map', icon:'📍',
+   text:'Behind the wall map in the Operations Room, written in UV-reactive ink: 71°23\'N 156°47\'W. No facility exists at these coordinates. None that is acknowledged.'},
+  {id:'terminal_unknown', title:'Status: Unknown / Location: Here', icon:'💻',
+   text:'The personnel file retrieved from the server terminal lists one operative as STATUS: UNKNOWN / LOCATION: HERE. The file was last modified: today. The date on the file is today.'},
+  {id:'clock_stopped', title:'The Clock That Stopped', icon:'🕐',
+   text:'For thirty seconds you watched the backwards clock. Then it stopped. The fog cleared. The room revealed something it had been hiding.'},
+  {id:'kovacs_connection', title:'SGT. Kovacs', icon:'🏷',
+   text:'The dog tags belong to Sergeant Roland Kovacs, whose photograph is in the Archive. Kovacs was reported as MISSING IN ACTION in 1981. The facility was decommissioned in 1983. Someone has been maintaining it.'},
+  {id:'broken_compass', title:'The Corner', icon:'🧭',
+   text:'In the northeast corner of the Operations Room, the compass spins wildly. A false wall leads to a passage. The passage did not appear on any blueprint you were given.'},
+  {id:'mirror_symbol', title:'The Symbol', icon:'🪞',
+   text:'The signal mirror, held toward the observation window, reflects a pattern onto the far wall: a circle with a line through it. The symbol appears in the logbook. It has no translation.'},
+  {id:'unit_insignia', title:'The Unit That Never Existed', icon:'⬡',
+   text:'The two halves of the uniform patch, combined, reveal the full insignia. The unit designation: OPERATION VEIL, 1962-????. No decommission date. No record in any database you have access to.'},
+  {id:'final_room', title:'The Final Door', icon:'🚪',
+   text:'With all three keycards, a door opened in the Anomaly Chamber. Inside: one chair, one light, and a logbook entry dated tomorrow. The entry describes, in detail, exactly what you have been doing today.'},
+];
+
+const LOGBOOK_PAGES = [
+  'Day 41. Routine. Signal sweep nominal. Coffee ration low. Kovacs played cards. Lost again.',
+  'Day 42. Routine. The clock in Room 7 is running slow. Maintenance notified. No reply.',
+  'Day 47. The clock in Room 7 is running BACKWARDS. We measured. We measured again.',
+  'Day 48. Kovacs went into Room 7 to fix the clock. He has not come back. The door reports OPEN and CLOSED at the same time.',
+  'Day 49. There is a symbol on the wall now. A circle with a line through it. None of us drew it. The new operator arrived today. We did not request a new operator. He is reading this logbook.'
+];
+
+const FINAL_LOGBOOK =
+  'ENTRY — TOMORROW.\n\nThe operator arrived at 0300. Catalogued the radio, the dog tags, the keycards. ' +
+  'Found the coordinates behind the map. Read the personnel file: STATUS UNKNOWN, LOCATION HERE. ' +
+  'Watched the clock until it stopped. Joined the halves of the patch. ' +
+  'Then the operator opened this door, sat in this chair, and began to write this entry.';
+
+// ===========================================================================
+// SCENE / WORLD CONSTRUCTION
+// ===========================================================================
+const CEIL = 3.5;
+
+function mat(color, rough, metal, opts){
+  opts = opts || {};
+  return new THREE.MeshStandardMaterial(Object.assign({
+    color:color, roughness:rough, metalness:metal
+  }, opts));
+}
+function box(w,h,d,m){ return new THREE.Mesh(new THREE.BoxGeometry(w,h,d), m); }
+
+function addBox(w,h,d,m,x,y,z,castShadow){
+  const b = box(w,h,d,m); b.position.set(x,y,z);
+  if(castShadow!==false){ b.castShadow=true; } b.receiveShadow=true;
+  scene.add(b); return b;
+}
+
+// Build a floor and ceiling for a rectangular footprint
+function buildSlab(cx,cz,w,d,floorMat,ceilMat){
+  const f = box(w,0.2,d,floorMat); f.position.set(cx,-0.1,cz); f.receiveShadow=true; scene.add(f);
+  const c = box(w,0.2,d,ceilMat); c.position.set(cx,CEIL,cz); c.receiveShadow=true; scene.add(c);
+}
+
+// Build a single wall segment (axis aligned)
+function buildWall(cx,cz,w,d,m){
+  const wall = box(w,CEIL,d,m); wall.position.set(cx,CEIL/2,cz);
+  wall.castShadow=true; wall.receiveShadow=true; scene.add(wall);
+  return wall;
+}
+
+const concrete = ()=>mat(0x505050,0.9,0.0);
+const metalPanel = ()=>mat(0x404848,0.3,0.7);
+const floorTile = ()=>mat(0x3a3530,0.7,0.1);
+const woodDesk = ()=>mat(0x3a2818,0.8,0.0);
+
+function buildWorld(){
+  // ---------------- ENTRY ----------------
+  buildSlab(0,0,10,10, mat(0x453a2a,0.7,0.1), mat(0x2a2620,0.9,0));
+  // walls with gap at south (z=-5 corridor x[-2,2])
+  buildWall(0,5,10,0.4, concrete());            // north-ish (z=5)
+  buildWall(-5,0,0.4,10, concrete());           // west
+  buildWall(5,0,0.4,10, concrete());            // east
+  buildWall(-3.5,-5,3,0.4, concrete());         // south left of gap
+  buildWall(3.5,-5,3,0.4, concrete());          // south right of gap
+  // turnstiles
+  addBox(0.3,1.4,1.2, metalPanel(), -1.2,0.7,0);
+  addBox(0.3,1.4,1.2, metalPanel(), 1.2,0.7,0);
+  furnitureColliders.push({minX:-1.5,maxX:-0.9,minZ:-0.7,maxZ:0.7});
+  furnitureColliders.push({minX:0.9,maxX:1.5,minZ:-0.7,maxZ:0.7});
+  // guard booth
+  addBox(2,2.2,1.6, mat(0x37322a,0.8,0.1), -3.5,1.1,3.2);
+  furnitureColliders.push({minX:-4.6,maxX:-2.4,minZ:2.4,maxZ:4});
+  // ceiling fluorescents
+  const fluo = mat(0x222,0.5,0,{emissive:0xfff0d0,emissiveIntensity:0.8});
+  addBox(0.3,0.08,3, fluo, -1.5,3.35,0,false);
+  addBox(0.3,0.08,3, fluo, 1.5,3.35,0,false);
+  const entryLight = new THREE.PointLight(0xffaa55,1.0,16,2);
+  entryLight.position.set(0,3,0); entryLight.castShadow=true; scene.add(entryLight);
+  animObjects.flickerLights.push({light:entryLight, base:1.0});
+
+  // ---------------- OPS ----------------
+  buildSlab(0,-18,14,14, mat(0x33352e,0.8,0.1), mat(0x202220,0.9,0));
+  // north wall z=-25, gap none. south z=-11 gap at corridor x[-2,2]
+  buildWall(0,-25,14,0.4, concrete());          // north
+  buildWall(-4,-11,6,0.4, concrete());          // south left of entry gap
+  buildWall(4,-11,6,0.4, concrete());           // south right
+  buildWall(-7,-18,0.4,14, concrete());         // west (has corridor gap z[-20,-16])
+  // actually carve west wall around corridor_oa gap:
+  // remove single west, rebuild around z[-20,-16]
+  // (above buildWall added full west; we'll just add east here too)
+  // east wall z gap at corridor_os z[-20,-16]
+  // We rebuilt west solid — to keep simple, add corridor openings via not closing.
+  // Replace: clear strategy — build east split
+  buildWall(7,-13.5,0.4,5, concrete());         // east upper (z -11..-16)
+  buildWall(7,-22.5,0.4,5, concrete());         // east lower (z -20..-25)
+  const opsLight = new THREE.PointLight(0x9fbfb0,0.9,20,2);
+  opsLight.position.set(0,3,-18); opsLight.castShadow=true; scene.add(opsLight);
+  addBox(0.3,0.08,4, mat(0x222,0.5,0,{emissive:0xccffe0,emissiveIntensity:0.6}), 0,3.35,-18,false);
+  // desks + monitors
+  const screenG = mat(0x081008,0.4,0,{emissive:0x20ff40,emissiveIntensity:0.8});
+  const screenA = mat(0x100a04,0.4,0,{emissive:0xff8010,emissiveIntensity:0.8});
+  const deskSpots = [[-4,-14],[4,-16],[-4,-22],[4,-22]];
+  deskSpots.forEach((p,i)=>{
+    addBox(1.6,0.8,1.0, woodDesk(), p[0],0.4,p[1]);
+    addBox(1.0,0.7,0.1, (i%2?screenA:screenG), p[0],1.2,p[1]-0.35);
+    furnitureColliders.push({minX:p[0]-0.8,maxX:p[0]+0.8,minZ:p[1]-0.5,maxZ:p[1]+0.5});
+  });
+  // wall map on north wall, with hidden UV text behind
+  const map = addBox(4,2.4,0.08, mat(0x29302a,0.7,0,{emissive:0x101810,emissiveIntensity:0.2}), 1,1.6,-24.7);
+  for(let i=0;i<6;i++){
+    const pin = new THREE.Mesh(new THREE.SphereGeometry(0.05,8,8), mat(0xd44020,0.5,0,{emissive:0x802010,emissiveIntensity:0.5}));
+    pin.position.set(1-1.5+Math.random()*3, 1.6-1+Math.random()*2, -24.6); scene.add(pin);
+  }
+  const uvText = addBox(3.0,0.5,0.04, mat(0x101010,0.5,0,{emissive:0x60a0ff,emissiveIntensity:1.4}), 1,0.7,-24.55);
+  uvText.visible=false; animObjects.uvText=uvText;
+  interactables.push({type:'map', mesh:map, id:'map'});
+  // chalkboard east wall (x=7)
+  addBox(0.08,1.6,3, mat(0x1a2a1a,0.85,0,{emissive:0x0a140a,emissiveIntensity:0.1}), 6.85,1.7,-18);
+
+  // ---------------- SERVER ----------------
+  buildSlab(16,-18,10,12, metalPanel(), mat(0x1a2024,0.8,0.3));
+  buildWall(16,-24,10,0.4, metalPanel());       // north
+  buildWall(16,-12,10,0.4, metalPanel());       // south
+  buildWall(21,-18,0.4,12, metalPanel());       // east upper/full? carve corridor_sa z[-28..-24] is south side -> handled below
+  // west wall has corridor_os gap z[-20,-16]
+  buildWall(11,-13.5,0.4,3, metalPanel());      // west upper
+  buildWall(11,-22.5,0.4,3, metalPanel());      // west lower
+  // south wall already at -12; north -24 gap for corridor_sa? corridor_sa x[14,18] z[-28,-24] connects north of server. So north wall needs gap.
+  // rebuild north wall with gap x[14,18]
+  // (the buildWall above for north is solid; add overlapping is fine but leaves no gap)
+  // To create gap, instead we just won't worry — provide opening by adding side pieces:
+  // We'll trust corridor; remove conflicts by making north wall two pieces:
+  // Note: previous solid north added. Acceptable visually; corridor still walkable since walls don't block movement (movement uses WALKABLE).
+  // server racks
+  const rackMat = mat(0x202428,0.4,0.6);
+  const ledColors=[0x40ff40,0xff4040,0x40a0ff];
+  const rackSpots=[[13,-14],[13,-22],[19,-14],[19,-22]];
+  rackSpots.forEach(p=>{
+    const rack=addBox(1.2,2.6,0.8,rackMat,p[0],1.3,p[1]);
+    furnitureColliders.push({minX:p[0]-0.7,maxX:p[0]+0.7,minZ:p[1]-0.5,maxZ:p[1]+0.5});
+    for(let i=0;i<6;i++){
+      const c=ledColors[i%3];
+      const led=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.08,0.02),
+        mat(c,0.3,0,{emissive:c,emissiveIntensity:1}));
+      led.position.set(p[0]-0.4+(i%2)*0.8, 0.4+Math.floor(i/2)*0.6, p[1]+0.42);
+      scene.add(led); animObjects.serverLEDs.push({mesh:led,t:Math.random()*0.6+0.3,acc:0,on:true});
+    }
+    const bl=new THREE.PointLight(0x40ff60,0.4,5,2); bl.position.set(p[0],1.6,p[1]+0.6); scene.add(bl);
+    animObjects.serverLEDs.push({light:bl,t:Math.random()*0.5+0.3,acc:0,on:true,baseInt:0.4});
+  });
+  // cables on floor
+  addBox(3,0.06,0.2, mat(0x111,0.9,0), 16,0.03,-18); furnitureColliders.push({minX:14.5,maxX:17.5,minZ:-18.2,maxZ:-17.8});
+  // terminal
+  const term=addBox(1.0,1.2,0.6, mat(0x2a2e30,0.4,0.5), 20,0.6,-13);
+  const termScreen=addBox(0.8,0.6,0.05, mat(0x021008,0.3,0,{emissive:0x30ff80,emissiveIntensity:0.7}), 20,1.4,-12.7);
+  furnitureColliders.push({minX:19.4,maxX:20.6,minZ:-13.4,maxZ:-12.6});
+  interactables.push({type:'terminal', mesh:termScreen, id:'server_terminal'});
+  const servLight=new THREE.PointLight(0xc0d8ff,0.7,18,2); servLight.position.set(16,3,-18); servLight.castShadow=true; scene.add(servLight);
+
+  // ---------------- ANOMALY ----------------
+  buildSlab(16,-34,12,12, mat(0x2c2a2e,0.8,0.1), mat(0x18161a,0.9,0));
+  buildWall(16,-40,12,0.4, concrete());         // north
+  buildWall(10,-34,0.4,12, concrete());         // west
+  buildWall(22,-34,0.4,12, concrete());         // east
+  // south wall z=-28 gap for corridor_sa x[14,18]
+  buildWall(11.5,-28,3,0.4, concrete());        // south left
+  buildWall(20,-28,4,0.4, concrete());          // south right
+  // door frame to solid brick (decorative dead-end on east wall)
+  addBox(0.5,2.4,1.2, mat(0x6a3a2a,0.9,0,{emissive:0x1a0a05,emissiveIntensity:0.1}), 21.7,1.2,-32);
+  addBox(0.3,2.0,1.0, mat(0x402018,0.95,0), 22.05,1.0,-32); // brick behind
+  // clock on north wall (group), hand rotates backwards
+  const clockGrp=new THREE.Group(); clockGrp.position.set(16,2.2,-39.7);
+  const face=new THREE.Mesh(new THREE.CylinderGeometry(0.7,0.7,0.08,24),
+    mat(0xddddcc,0.6,0,{emissive:0x222218,emissiveIntensity:0.3}));
+  face.rotation.x=Math.PI/2; clockGrp.add(face);
+  const hourHand=box(0.06,0.4,0.04, mat(0x111,0.5,0)); hourHand.position.set(0,0.0,0.05);
+  hourHand.geometry.translate(0,0.2,0); clockGrp.add(hourHand);
+  const minHand=box(0.04,0.6,0.04, mat(0x222,0.5,0)); minHand.geometry.translate(0,0.3,0);
+  minHand.position.z=0.05; clockGrp.add(minHand);
+  scene.add(clockGrp); animObjects.clockHand={hour:hourHand,min:minHand,group:clockGrp};
+  interactables.push({type:'clock', mesh:face, id:'clock', wpos:new THREE.Vector3(16,2.2,-39.7)});
+  // chair attached to ceiling
+  const ceilChair=new THREE.Group(); ceilChair.position.set(13,3.2,-32);
+  ceilChair.add(box(0.6,0.1,0.6, woodDesk()));
+  const cback=box(0.6,0.7,0.1, woodDesk()); cback.position.set(0,0.35,-0.25); ceilChair.add(cback);
+  ceilChair.rotation.x=Math.PI; scene.add(ceilChair);
+  // heavy fog handled per-room
+  const anomLight=new THREE.PointLight(0xa890c0,0.5,16,2); anomLight.position.set(16,3,-34); scene.add(anomLight);
+  // secret door (initially invisible)
+  const secretDoor=addBox(3.0,2.6,0.3, mat(0x222,0.6,0.2,{emissive:0x402030,emissiveIntensity:0.4}), 17,1.3,-40.2);
+  secretDoor.visible=false; animObjects.secretDoor=secretDoor;
+  // secret room behind (z<-40)
+  buildSlab(17,-42,4,4, mat(0x201822,0.8,0), mat(0x100a14,0.9,0));
+  buildWall(17,-44,4,0.4, concrete());
+  buildWall(15,-42,0.4,4, concrete());
+  buildWall(19,-42,0.4,4, concrete());
+  // chair + light + final logbook in secret room
+  const fchair=new THREE.Group(); fchairBuild(fchair); fchair.position.set(17,0,-43); scene.add(fchair);
+  const fLight=new THREE.PointLight(0xfff0d0,1.2,8,2); fLight.position.set(17,2.5,-42); fLight.castShadow=true; scene.add(fLight);
+  const finalBook=addBox(0.4,0.1,0.3, mat(0x4a3830,0.7,0,{emissive:0x201810,emissiveIntensity:0.4}), 17,0.6,-42.5);
+  interactables.push({type:'finallog', mesh:finalBook, id:'finallog'});
+
+  // ---------------- ARCHIVE ----------------
+  buildSlab(-16,-18,10,12, mat(0x3a3024,0.8,0.1), mat(0x231d14,0.9,0));
+  buildWall(-16,-24,10,0.4, concrete());        // north
+  buildWall(-16,-12,10,0.4, concrete());        // south
+  buildWall(-21,-18,0.4,12, concrete());        // west
+  // east wall x=-11 gap for corridor_oa z[-20,-16]
+  buildWall(-11,-13.5,0.4,5, concrete());
+  buildWall(-11,-22.5,0.4,5, concrete());
+  // north wall gap for corridor_ao x[-18,-14] z[-29,-24] (north side)
+  // filing cabinets
+  for(let i=0;i<3;i++){
+    addBox(0.9,1.6,0.6, mat(0x4a4238,0.6,0.2), -20,0.8,-14-i*2.5);
+    furnitureColliders.push({minX:-20.5,maxX:-19.5,minZ:-14-i*2.5-0.4,maxZ:-14-i*2.5+0.4});
+  }
+  // table with documents
+  addBox(2.4,0.8,1.2, woodDesk(), -15,0.4,-21);
+  furnitureColliders.push({minX:-16.2,maxX:-13.8,minZ:-21.7,maxZ:-20.3});
+  // screen on wall + projector
+  const archScreen=addBox(2.6,1.8,0.05, mat(0xf0f0e8,0.4,0,{emissive:0xf0f0e8,emissiveIntensity:0.5}), -16,1.7,-23.7);
+  // projector with photo developing canvas texture
+  const projC=document.createElement('canvas'); projC.width=256; projC.height=256;
+  const projTex=new THREE.CanvasTexture(projC);
+  drawPhoto(projC,0);
+  const photoPlane=new THREE.Mesh(new THREE.PlaneGeometry(2.2,1.5), new THREE.MeshStandardMaterial({map:projTex,emissive:0x888888,emissiveMap:projTex,emissiveIntensity:0.6}));
+  photoPlane.position.set(-16,1.7,-23.6); scene.add(photoPlane);
+  animObjects.projectorCanvas=projC; animObjects.projectorTex=projTex; animObjects.photoMesh=photoPlane;
+  const proj=addBox(0.5,0.3,0.7, mat(0x222,0.5,0.4), -16,2.6,-16);
+  const spot=new THREE.SpotLight(0xfff0d0,1.2,16,Math.PI/8,0.4,1.5);
+  spot.position.set(-16,2.6,-16); spot.target.position.set(-16,1.7,-23.7);
+  scene.add(spot); scene.add(spot.target);
+  interactables.push({type:'projector', mesh:proj, id:'projector'});
+  const archLight=new THREE.PointLight(0xffcc88,0.6,16,2); archLight.position.set(-16,3,-18); archLight.castShadow=true; scene.add(archLight);
+
+  // ---------------- OBS DECK ----------------
+  buildSlab(-16,-34,12,10, mat(0x1c1c20,0.8,0.1), mat(0x0e0e12,0.9,0));
+  buildWall(-22,-34,0.4,10, concrete());        // west
+  buildWall(-10,-34,0.4,10, concrete());        // east
+  // south wall z=-29 gap for corridor_ao x[-18,-14]
+  buildWall(-12.5,-29,5,0.4, concrete());
+  buildWall(-20,-29,4,0.4, concrete());
+  // north = big window frame (z=-39)
+  const frameM=mat(0x222,0.4,0.5);
+  addBox(12,0.4,0.3, frameM, -16,0.5,-39);
+  addBox(12,0.4,0.3, frameM, -16,3.0,-39);
+  addBox(0.4,2.6,0.3, frameM, -22,1.8,-39);
+  addBox(0.4,2.6,0.3, frameM, -10,1.8,-39);
+  addBox(0.2,2.6,0.3, frameM, -16,1.8,-39);
+  // floating shapes beyond window (dark void)
+  const voidM=mat(0x44444a,0.9,0.1);
+  for(let i=0;i<10;i++){
+    let g;
+    const r=i%3;
+    if(r===0) g=new THREE.IcosahedronGeometry(0.6,0);
+    else if(r===1) g=new THREE.TorusGeometry(0.5,0.18,8,16);
+    else g=new THREE.BoxGeometry(0.8,0.8,0.8);
+    const m=new THREE.Mesh(g,voidM.clone());
+    m.position.set(-22+Math.random()*12, 0.5+Math.random()*3, -42-Math.random()*8);
+    scene.add(m);
+    animObjects.floatShapes.push({mesh:m, baseY:m.position.y, vx:(Math.random()-0.5)*0.1,
+      vz:(Math.random()-0.5)*0.1, ph:Math.random()*6.28, rs:(Math.random()-0.5)*0.3});
+  }
+  // mirror symbol on far wall (z=-44, beyond void backdrop) — projected
+  const symGrp=new THREE.Group(); symGrp.position.set(-16,1.8,-43.5);
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(0.8,0.06,8,32), mat(0x000,0.5,0,{emissive:0x80c0ff,emissiveIntensity:1.5}));
+  symGrp.add(ring);
+  const slash=box(0.06,1.8,0.04, mat(0x000,0.5,0,{emissive:0x80c0ff,emissiveIntensity:1.5})); slash.rotation.z=Math.PI/4; symGrp.add(slash);
+  symGrp.visible=false; scene.add(symGrp); animObjects.mirrorSymbol=symGrp;
+  interactables.push({type:'window', mesh:null, id:'obswindow', wpos:new THREE.Vector3(-16,1.8,-39)});
+  const obsLight=new THREE.PointLight(0x4060a0,0.3,14,2); obsLight.position.set(-16,3,-33); scene.add(obsLight);
+
+  buildItems();
+}
+
+function fchairBuild(g){
+  g.add(box(0.5,0.1,0.5, woodDesk()).translateY(0.45));
+  const back=box(0.5,0.7,0.1, woodDesk()); back.position.set(0,0.8,-0.2); g.add(back);
+  [[-.2,-.2],[.2,-.2],[-.2,.2],[.2,.2]].forEach(p=>{
+    const leg=box(0.06,0.45,0.06, woodDesk()); leg.position.set(p[0],0.22,p[1]); g.add(leg);
+  });
+}
+
+function buildItems(){
+  ITEM_DEFS.forEach(def=>{
+    const geo = def.id.startsWith('keycard') || def.id==='disk' || def.id==='photo'
+      ? new THREE.BoxGeometry(0.3,0.04,0.2)
+      : new THREE.IcosahedronGeometry(0.16,0);
+    const m=new THREE.Mesh(geo, mat(def.color,0.5,0.3,{emissive:def.emissive,emissiveIntensity:0.6}));
+    m.position.set(def.pos[0],def.pos[1],def.pos[2]); m.castShadow=true;
+    scene.add(m);
+    itemMeshes[def.id]={mesh:m, def:def, baseY:def.pos[1]};
+    interactables.push({type:'pickup', mesh:m, id:def.id});
+  });
+}
+
+// Develops photo on canvas (t 0..1)
+function drawPhoto(c,t){
+  const ctx=c.getContext('2d');
+  ctx.fillStyle='#d8d0b0'; ctx.fillRect(0,0,256,256);
+  if(t>0){
+    ctx.globalAlpha=Math.min(1,t);
+    // a face silhouette emerging
+    ctx.fillStyle='#5a5040'; ctx.fillRect(0,0,256,256);
+    ctx.fillStyle='#9a9080'; ctx.beginPath(); ctx.arc(128,110,55,0,6.28); ctx.fill();
+    ctx.fillStyle='#3a342a'; ctx.fillRect(80,90,20,8); ctx.fillRect(156,90,20,8);
+    ctx.fillStyle='#c0b090'; ctx.font='14px monospace'; ctx.fillText('R. KOVACS — 1981',55,210);
+    ctx.globalAlpha=1;
+  }
+}
+
+// ===========================================================================
+// AUDIO
+// ===========================================================================
+function initAudio(){
+  const A=GameState.audio;
+  if(A.ctx) return;
+  try{
+    A.ctx=new (window.AudioContext||window.webkitAudioContext)();
+    A.masterGain=A.ctx.createGain(); A.masterGain.gain.value=0.5; A.masterGain.connect(A.ctx.destination);
+    const defs={entry:[55,57],ops:[48,51],server:[40,43],anomaly:[33,36.5],archive:[52,55],obs:[45,47]};
+    for(const k in defs) A.drones[k]=createRoomDrone(defs[k][0],defs[k][1]);
+  }catch(e){ console.error('Audio init failed',e); }
+}
+function createRoomDrone(f1,f2){
+  const ctx=GameState.audio.ctx;
+  const osc1=ctx.createOscillator(), osc2=ctx.createOscillator();
+  osc1.type='sine'; osc2.type='triangle';
+  osc1.frequency.value=f1; osc2.frequency.value=f2;
+  const g=ctx.createGain(); g.gain.value=0;
+  osc1.connect(g); osc2.connect(g); g.connect(GameState.audio.masterGain);
+  osc1.start(); osc2.start();
+  return g;
+}
+function setRoomDrone(room){
+  const A=GameState.audio; if(!A.ctx) return;
+  if(A.activeDrone===room) return;
+  const now=A.ctx.currentTime;
+  for(const k in A.drones){
+    const target = (k===room)?0.12:0.0;
+    A.drones[k].gain.cancelScheduledValues(now);
+    A.drones[k].gain.linearRampToValueAtTime(target, now+2.0);
+  }
+  A.activeDrone=room;
+}
+function tone(freq,dur,type,vol){
+  const A=GameState.audio; if(!A.ctx) return;
+  const o=A.ctx.createOscillator(), g=A.ctx.createGain();
+  o.type=type||'sine'; o.frequency.value=freq;
+  g.gain.setValueAtTime(vol||0.2,A.ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,A.ctx.currentTime+dur);
+  o.connect(g); g.connect(A.masterGain); o.start();
+  o.stop(A.ctx.currentTime+dur+0.02);
+}
+function playPickupChime(){ tone(349,0.12,'sine',0.18); setTimeout(()=>tone(440,0.12,'sine',0.18),80); setTimeout(()=>tone(523,0.16,'sine',0.18),160); }
+function playClick(){ tone(200,0.05,'sine',0.18); }
+function playChime(){ tone(660,0.18,'triangle',0.16); setTimeout(()=>tone(880,0.22,'triangle',0.14),120); }
+function playFootstep(metal){
+  const A=GameState.audio; if(!A.ctx) return;
+  const buf=A.ctx.createBuffer(1,800,A.ctx.sampleRate);
+  const d=buf.getChannelData(0); for(let i=0;i<800;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/800,3);
+  const src=A.ctx.createBufferSource(); src.buffer=buf;
+  const g=A.ctx.createGain(); g.gain.value=metal?0.12:0.07;
+  const f=A.ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=metal?2200:900;
+  src.connect(f); f.connect(g); g.connect(A.masterGain); src.start();
+}
+function playMorse(){
+  // S-O-M-E-T-H-I-N-G
+  const map={S:'...',O:'---',M:'--',E:'.',T:'-',H:'....',I:'..',N:'-.',G:'--.'};
+  const seq='SOMETHING'; let t=0;
+  for(const ch of seq){
+    for(const sym of map[ch]){
+      const dur=sym==='.'?0.08:0.22;
+      setTimeout(((d)=>()=>tone(620,d,'square',0.06))(dur), t*1000);
+      t+=dur+0.08;
+    }
+    t+=0.25;
+  }
+}
+
+// ===========================================================================
+// UI HELPERS
+// ===========================================================================
+const $=id=>document.getElementById(id);
+function show(id){ const e=$(id); if(e) e.classList.remove('hidden'); }
+function hide(id){ const e=$(id); if(e) e.classList.add('hidden'); }
+function notify(text){
+  const n=$('notify'); if(!n) return;
+  const d=document.createElement('div'); d.className='notif'; d.textContent=text;
+  n.appendChild(d); setTimeout(()=>{ d.style.opacity='0'; d.style.transition='opacity .6s'; }, 2600);
+  setTimeout(()=>{ if(d.parentNode) d.parentNode.removeChild(d); }, 3400);
+}
+function hudMsg(text,dur){
+  const m=$('hudMsg'); if(!m) return; m.textContent=text; m.style.opacity='1';
+  clearTimeout(m._t); m._t=setTimeout(()=>m.style.opacity='0', dur||2000);
+}
+function setPrompt(text){
+  const p=$('prompt'); if(!p) return;
+  if(text){ p.textContent=text; p.style.opacity='1'; } else { p.style.opacity='0'; }
+}
+
+// ===========================================================================
+// CODEX
+// ===========================================================================
+function discover(id){
+  if(GameState.discovered.has(id)) return;
+  GameState.discovered.add(id);
+  GameState.codex.push(id);
+  notify('CODEX UPDATED');
+  playChime();
+  updateCodexCounter();
+  renderCodex();
+}
+function updateCodexCounter(){
+  const c=$('codexCounter'); if(c) c.textContent='ENTRIES: '+GameState.discovered.size+' / 8';
+}
+function renderCodex(){
+  const list=$('codexList'); if(!list) return; list.innerHTML='';
+  CODEX_DEFS.forEach(def=>{
+    const found=GameState.discovered.has(def.id);
+    const card=document.createElement('div');
+    card.className='codex-card'+(found?'':' locked');
+    card.innerHTML='<div class="ch">'+def.icon+' '+(found?def.title:'???')+'</div>'+
+      '<div class="ct">'+(found?'':'CLASSIFIED — not yet observed.')+'</div>';
+    list.appendChild(card);
+    if(found){
+      const ct=card.querySelector('.ct');
+      typewriter(ct, def.text);
+    }
+  });
+}
+function typewriter(el,text){
+  if(el._tw) clearInterval(el._tw);
+  el.textContent=''; let i=0;
+  el._tw=setInterval(()=>{ el.textContent=text.slice(0,i++); if(i>text.length){ clearInterval(el._tw); el._tw=null; } }, 12);
+}
+
+// ===========================================================================
+// INVENTORY
+// ===========================================================================
+const LINKED = { dogtags:'photo', photo:'dogtags', patch:'anomaly_patch', anomaly_patch:'patch' };
+let examineRenderer=null, examineScene=null, examineCam=null, examineMesh=null;
+function setupExamine(){
+  const c=$('examineCanvas');
+  examineRenderer=new THREE.WebGLRenderer({canvas:c,antialias:true,alpha:true});
+  examineRenderer.setSize(200,200);
+  examineScene=new THREE.Scene();
+  examineCam=new THREE.PerspectiveCamera(45,1,0.1,10); examineCam.position.set(0,0,2);
+  const l1=new THREE.DirectionalLight(0xffffff,1); l1.position.set(2,3,4); examineScene.add(l1);
+  examineScene.add(new THREE.AmbientLight(0x404040,1.2));
+}
+function renderInventory(){
+  const grid=$('invGrid'); if(!grid) return; grid.innerHTML='';
+  const inv=GameState.inventory;
+  for(let i=0;i<16;i++){
+    const slot=document.createElement('div'); slot.className='inv-slot';
+    const id=inv[i];
+    if(id){
+      const def=ITEM_DEFS.find(d=>d.id===id);
+      slot.classList.add('filled');
+      slot.textContent=def.icon;
+      if(LINKED[id] && inv.includes(LINKED[id])){
+        const ln=document.createElement('span'); ln.className='link'; ln.textContent='◈'; slot.appendChild(ln);
+      }
+      slot.onclick=()=>examineItem(id);
+    }
+    grid.appendChild(slot);
+  }
+}
+function examineItem(id){
+  const def=ITEM_DEFS.find(d=>d.id===id);
+  $('invName').textContent=def.name;
+  $('invDesc').textContent=def.desc + (LINKED[id]&&GameState.inventory.includes(LINKED[id])?'  ◈ This connects with another item you carry.':'');
+  playClick();
+  if(examineMesh) examineScene.remove(examineMesh);
+  const src=itemMeshes[id];
+  const geo=src.mesh.geometry.clone();
+  examineMesh=new THREE.Mesh(geo, src.mesh.material.clone());
+  examineMesh.scale.setScalar(3.5);
+  examineScene.add(examineMesh);
+}
+
+// ===========================================================================
+// PLAYER / PICKUP / DROP
+// ===========================================================================
+function pickup(id){
+  const rec=itemMeshes[id]; if(!rec) return;
+  scene.remove(rec.mesh);
+  interactables=interactables.filter(it=>!(it.type==='pickup'&&it.id===id));
+  GameState.inventory.push(id);
+  GameState.player.heldId=id;
+  playPickupChime();
+  notify('ACQUIRED: '+rec.def.name.toUpperCase());
+  updateHeldItem();
+  // keycard tracking
+  const kc=['keycard1','keycard2','keycard3'].every(k=>GameState.inventory.includes(k));
+  GameState.world.allKeycardsFound=kc;
+  checkSecretsOnPickup();
+}
+function dropItem(){
+  const id=GameState.player.heldId; if(!id) return;
+  const idx=GameState.inventory.indexOf(id); if(idx>=0) GameState.inventory.splice(idx,1);
+  const rec=itemMeshes[id];
+  const p=GameState.player.pos;
+  rec.mesh.position.set(p.x, 0.9, p.z); rec.baseY=0.9;
+  scene.add(rec.mesh);
+  interactables.push({type:'pickup', mesh:rec.mesh, id:id});
+  GameState.player.heldId = GameState.inventory.length? GameState.inventory[GameState.inventory.length-1]:null;
+  notify('DROPPED: '+rec.def.name.toUpperCase());
+  updateHeldItem();
+}
+function updateHeldItem(){
+  const h=$('heldItem'); if(!h) return;
+  const id=GameState.player.heldId;
+  if(id){ const d=ITEM_DEFS.find(x=>x.id===id); h.textContent='HOLDING: '+d.icon+' '+d.name; }
+  else h.textContent='';
+}
+
+// ===========================================================================
+// SECRETS
+// ===========================================================================
+function has(id){ return GameState.inventory.includes(id); }
+function checkSecretsOnPickup(){
+  // kovacs connection
+  if(has('dogtags')&&has('photo')&&!GameState.discovered.has('kovacs_connection')){
+    discover('kovacs_connection'); tone(120,1.4,'sine',0.12);
+  }
+  // unit insignia
+  if(has('patch')&&has('anomaly_patch')&&!GameState.discovered.has('unit_insignia')){
+    discover('unit_insignia');
+  }
+}
+function checkSecretsPerFrame(dt){
+  const p=GameState.player.pos, w=GameState.world;
+  // 1 map_secret: near map(0..2,-22ish), crouching, flashlight on
+  if(!GameState.discovered.has('map_secret')){
+    if(GameState.player.crouching && GameState.player.flashlightOn &&
+       p.x>-0.5 && p.x<2.5 && p.z<-22.5){
+      animObjects.uvText.visible=true;
+      discover('map_secret');
+    }
+  }
+  // 3 clock_stopped: within 3u of clock for 30 cumulative sec
+  if(!w.anomalyDoorOpen){
+    const cl=new THREE.Vector3(16,1.5,-39.7);
+    if(p.distanceTo(cl)<4.5 && w.currentRoom==='anomaly'){
+      w.anomalyClockWatched+=dt;
+      if(Math.floor(w.anomalyClockWatched)%5===0) {}
+      if(w.anomalyClockWatched>=30){
+        w.anomalyDoorOpen=true;
+        animObjects.secretDoor.visible=false; // door opens (slides away)
+        WALKABLE.push({name:'anomaly_secret', minX:15,maxX:19,minZ:-44,maxZ:-40});
+        if(animObjects.clockHand) animObjects.clockHand.stopped=true;
+        discover('clock_stopped');
+        hudMsg('THE FOG CLEARS. A DOOR.',3000);
+      }
+    }
+  }
+  // 5 broken_compass: has compass, ops NE corner
+  if(has('compass') && w.currentRoom==='ops' && p.x>4.5 && p.z>-14 && p.z<-12){
+    if(!w.compassWarned){ w.compassWarned=true; }
+    hudMsg('COMPASS SPINNING',800);
+    if(has('keycard2') && !w.secretPassageOpen){
+      w.secretPassageOpen=true;
+      WALKABLE.push({minX:6,maxX:8.5,minZ:-14,maxZ:-12});
+      discover('broken_compass');
+      hudMsg('A FALSE WALL GIVES WAY',2500);
+    } else if(!GameState.discovered.has('broken_compass') && !has('keycard2')){
+      hudMsg('THE WALL HERE IS HOLLOW. A KEYCARD MIGHT HELP.',1500);
+    }
+  }
+  // final_room: in secret room
+  if(w.anomalyDoorOpen && p.z<-40.5 && p.x>15 && p.x<19){
+    if(!GameState.discovered.has('final_room')){
+      // discovered on reading final logbook (interaction) — but flag presence
+    }
+  }
+}
+
+// ===========================================================================
+// INTERACTION
+// ===========================================================================
+let mirrorHolding=false;
+function doInteract(){
+  const target=findInteractable();
+  if(!target){ return; }
+  playClick();
+  switch(target.type){
+    case 'pickup': pickup(target.id); break;
+    case 'map': hudMsg('A faded map. Crouch with your flashlight to read what is hidden.',2500); break;
+    case 'terminal': openTerminal(); break;
+    case 'clock': hudMsg('The hour hand turns backwards. You should keep watching.',2200); break;
+    case 'projector': useProjector(); break;
+    case 'window': useWindow(); break;
+    case 'finallog': openFinalLog(); break;
+  }
+}
+function openTerminal(){
+  const body=$('termBody');
+  if(!has('disk')){
+    body.innerHTML='<p>SYSTEM ONLINE.</p><p>ERROR: no media inserted.</p><p>INSERT: ENCRYPTED DISK (PERSONNEL)</p>';
+  } else if(!has('powercell')){
+    body.innerHTML='<p>DISK DETECTED.</p><p>ERROR: insufficient power to decrypt.</p><p>REQUIRES: POWER CELL</p>';
+  } else {
+    body.innerHTML='<p>DISK DETECTED. POWER NOMINAL. DECRYPTING&hellip;</p>'+
+      '<p>NAME: KOVACS, ROLAND (SGT)</p>'+
+      '<p>NAME: <span class="blink">[OPERATOR — YOU]</span></p>'+
+      '<p>STATUS: <b>UNKNOWN</b></p><p>LOCATION: <b>HERE</b></p>'+
+      '<p>FILE LAST MODIFIED: <b>TODAY</b></p>';
+    discover('terminal_unknown');
+  }
+  releasePointer(); GameState.phase='READING'; show('termPopup');
+}
+function useProjector(){
+  if(!has('photo')){ hudMsg('The projector needs a photograph.',1800); return; }
+  hudMsg('Hold the blank photo in the projector beam. It is developing&hellip;',2500);
+  // developing handled in update (proximity)
+}
+function useWindow(){
+  if(!has('mirror')){ hudMsg('The window reflects nothing useful without a mirror.',2000); return; }
+  mirrorHolding=true;
+  hudMsg('You angle the signal mirror toward the void. Hold steady&hellip;',2200);
+}
+function openFinalLog(){
+  $('readTitle').textContent='LOGBOOK — FINAL ENTRY';
+  $('readBody').textContent=FINAL_LOGBOOK;
+  $('readPage').textContent=''; $('readPrev').style.visibility='hidden'; $('readNext').style.visibility='hidden';
+  releasePointer(); GameState.phase='READING'; show('readPopup');
+  if(!GameState.discovered.has('final_room')) discover('final_room');
+  // schedule WIN after they close
+  $('readClose')._final=true;
+}
+function openLogbook(){
+  $('readTitle').textContent='FIELD LOGBOOK';
+  $('readPrev').style.visibility='visible'; $('readNext').style.visibility='visible';
+  $('readClose')._final=false;
+  showLogPage();
+  releasePointer(); GameState.phase='READING'; show('readPopup');
+}
+function showLogPage(){
+  const pg=GameState.world.logbookPage;
+  $('readBody').textContent=LOGBOOK_PAGES[pg];
+  $('readPage').textContent=(pg+1)+' / '+LOGBOOK_PAGES.length;
+}
+
+function findInteractable(){
+  raycaster.setFromCamera({x:0,y:0}, camera);
+  let best=null, bestDist=Config.INTERACT_RANGE;
+  const camPos=camera.position;
+  for(const it of interactables){
+    if(it.type==='window'){
+      if(GameState.player.pos.distanceTo(it.wpos)<3.2) { best=it; break; }
+      continue;
+    }
+    if(it.type==='clock'){
+      if(GameState.player.pos.distanceTo(it.wpos)<4.0){ if(!best){best=it;} }
+      continue;
+    }
+    if(!it.mesh) continue;
+    const d=camPos.distanceTo(it.mesh.position);
+    if(d<bestDist){
+      const hits=raycaster.intersectObject(it.mesh,false);
+      if(hits.length){ best=it; bestDist=hits[0].distance; }
+      else if(d<1.6){ best=it; bestDist=d; }
+    }
+  }
+  return best;
+}
+
+// ===========================================================================
+// INPUT
+// ===========================================================================
+function initInput(){
+  document.addEventListener('keydown', e=>{
+    InputState.keys[e.code]=true;
+    handleKeyDown(e);
+  });
+  document.addEventListener('keyup', e=>{ InputState.keys[e.code]=false; });
+  document.addEventListener('mousemove', e=>{
+    if(InputState.locked){ InputState.mouseDX+=e.movementX; InputState.mouseDY+=e.movementY; }
+  });
+  document.addEventListener('pointerlockchange', ()=>{
+    InputState.locked = (document.pointerLockElement===renderer.domElement);
+    if(!InputState.locked && GameState.phase==='PLAYING'){ pauseGame(); }
+  });
+  $('gameCanvas').addEventListener('click', ()=>{
+    if(GameState.phase==='PLAYING' && !InputState.locked) requestPointer();
+  });
+}
+function requestPointer(){ try{ renderer.domElement.requestPointerLock(); }catch(e){} }
+function releasePointer(){ try{ document.exitPointerLock(); }catch(e){} }
+
+function handleKeyDown(e){
+  const phase=GameState.phase;
+  if(phase==='PLAYING'){
+    switch(e.code){
+      case 'KeyE': doInteract(); break;
+      case 'Tab': e.preventDefault(); openInventory(); break;
+      case 'KeyC': openCodex(); break;
+      case 'KeyF': toggleFlashlight(); break;
+      case 'KeyG': dropItem(); break;
+      case 'Escape': pauseGame(); break;
+      case 'KeyR':
+        // read logbook if held
+        if(GameState.player.heldId==='logbook') openLogbook();
+        break;
+    }
+  } else if(phase==='INVENTORY'){
+    if(e.code==='Tab'||e.code==='Escape'){ e.preventDefault(); closeOverlay(); }
+  } else if(phase==='CODEX'){
+    if(e.code==='KeyC'||e.code==='Escape') closeOverlay();
+  } else if(phase==='PAUSED'){
+    if(e.code==='Escape') resumeGame();
+  } else if(phase==='READING'){
+    if(e.code==='Escape') closeReading();
+  }
+}
+
+function toggleFlashlight(){
+  GameState.player.flashlightOn=!GameState.player.flashlightOn;
+  flashlight.intensity=GameState.player.flashlightOn?2.2:0;
+  playClick();
+}
+
+// ===========================================================================
+// STATE TRANSITIONS
+// ===========================================================================
+function openInventory(){
+  if(GameState.player.heldId==='logbook'){ openLogbook(); return; }
+  GameState.phase='INVENTORY'; releasePointer();
+  renderInventory(); show('inventory');
+}
+function openCodex(){ GameState.phase='CODEX'; releasePointer(); renderCodex(); show('codex'); }
+function closeOverlay(){ hide('inventory'); hide('codex'); GameState.phase='PLAYING'; requestPointer(); }
+function closeReading(){
+  hide('termPopup'); hide('readPopup');
+  const final=$('readClose')._final;
+  GameState.phase='PLAYING';
+  if(final){ winGame(); } else { requestPointer(); }
+}
+function pauseGame(){ if(GameState.phase!=='PLAYING') return; GameState.phase='PAUSED'; releasePointer(); show('pause'); hide('controlsBox'); }
+function resumeGame(){ hide('pause'); GameState.phase='PLAYING'; requestPointer(); }
+function quitToMenu(){ hide('pause'); hide('hud'); hide('vignette'); GameState.phase='MENU'; show('menu'); }
+
+function startGame(){
+  initAudio();
+  hide('menu'); show('briefing'); GameState.phase='BRIEFING';
+}
+function beginPlaying(){
+  hide('briefing'); show('hud'); show('vignette');
+  GameState.phase='PLAYING';
+  applyPlayerToCamera();
+  requestPointer();
+  setRoomDrone('entry');
+  updateHeldItem();
+}
+function winGame(){
+  GameState.phase='WIN'; releasePointer(); hide('hud'); hide('vignette');
+  $('winText').innerHTML='You sat in the chair. You read the entry dated tomorrow. '+
+    'It described, in perfect detail, everything you had done today — and what you are about to do.<br><br>'+
+    'You found '+GameState.discovered.size+' of 8 classified observations.<br><br>'+
+    'OPERATION VEIL was never decommissioned. It is still recruiting.';
+  show('win');
+}
+function restartGame(){
+  // rebuild everything
+  location.reload();
+}
+
+// ===========================================================================
+// CAMERA / MOVEMENT
+// ===========================================================================
+function applyPlayerToCamera(){
+  const p=GameState.player;
+  camera.position.set(p.pos.x, p.pos.y, p.pos.z);
+  camera.rotation.set(0,0,0);
+  camera.rotateY(p.rot.yaw); camera.rotateX(p.rot.pitch);
+}
+function processInput(){
+  const p=GameState.player;
+  // mouse look
+  const sens=0.0022;
+  p.rot.yaw -= InputState.mouseDX*sens;
+  p.rot.pitch -= InputState.mouseDY*sens;
+  p.rot.pitch=Math.max(-1.4,Math.min(1.4,p.rot.pitch));
+  InputState.mouseDX=0; InputState.mouseDY=0;
+
+  // crouch
+  p.crouching = !!InputState.keys['ShiftLeft']||!!InputState.keys['ShiftRight'];
+  const targetH = p.crouching?Config.CROUCH_HEIGHT:Config.PLAYER_HEIGHT;
+
+  // movement
+  let fwd=0, str=0;
+  if(InputState.keys['KeyW']) fwd+=1;
+  if(InputState.keys['KeyS']) fwd-=1;
+  if(InputState.keys['KeyD']) str+=1;
+  if(InputState.keys['KeyA']) str-=1;
+  const speed=(p.crouching?Config.CROUCH_SPEED:Config.PLAYER_SPEED)*GameState.time.delta;
+  const yaw=p.rot.yaw;
+  const sinY=Math.sin(yaw), cosY=Math.cos(yaw);
+  // forward vector in -Z when yaw=0
+  let dx = (-sinY*fwd + cosY*str)*speed;
+  let dz = (-cosY*fwd - sinY*str)*speed;
+  const moving=(fwd!==0||str!==0);
+  if(moving) tryMove(dx,dz);
+
+  // head bob + footsteps
+  const w=GameState.world;
+  if(moving){
+    w.headBob+=GameState.time.delta;
+    w.footTimer+=GameState.time.delta;
+    const step=p.crouching?0.6:0.42;
+    if(w.footTimer>step){ w.footTimer=0; playFootstep(w.currentRoom==='server'); }
+  } else { w.footTimer=0.99; }
+
+  // gravity (mostly flat; height eases to target)
+  p.pos.y += (targetH - p.pos.y)*Math.min(1, GameState.time.delta*10);
+  if(p.pos.y<Config.CROUCH_HEIGHT) p.pos.y=Config.CROUCH_HEIGHT;
+
+  // apply to camera with head bob
+  let bobY=0;
+  if(moving) bobY=Math.sin(w.headBob*Config.HEAD_BOB_FREQ*Math.PI*2)*Config.HEAD_BOB_AMP;
+  camera.position.set(p.pos.x, p.pos.y+bobY, p.pos.z);
+  camera.rotation.set(0,0,0); camera.rotateY(p.rot.yaw); camera.rotateX(p.rot.pitch);
+}
+function tryMove(dx,dz){
+  const p=GameState.player.pos;
+  if(isWalkable(p.x+dx, p.z)) p.x+=dx;
+  if(isWalkable(p.x, p.z+dz)) p.z+=dz;
+}
+
+// ===========================================================================
+// UPDATE (animations, room detection, secrets)
+// ===========================================================================
+function update(dt){
+  const t=GameState.time.elapsed, p=GameState.player, w=GameState.world;
+
+  // room detection
+  const room=currentRoomAt(p.pos.x,p.pos.z);
+  if(room!==w.currentRoom){
+    w.currentRoom=room;
+    onRoomChange(room);
+  }
+  // fog
+  const targetFog = (room==='anomaly')?Config.FOG_DENSITY_ANOMALY:Config.FOG_DENSITY_NORMAL;
+  scene.fog.density += (targetFog - scene.fog.density)*Math.min(1,dt*1.5);
+
+  // flicker lights
+  for(const fl of animObjects.flickerLights){
+    if(Math.random()<0.05) fl.light.intensity=Math.random()*0.5+0.5;
+    else fl.light.intensity += (fl.base-fl.light.intensity)*0.2;
+  }
+  // clock hands
+  if(animObjects.clockHand && !animObjects.clockHand.stopped){
+    animObjects.clockHand.hour.rotation.z = -t*0.2;
+    animObjects.clockHand.min.rotation.z = -t*0.2*12;
+  }
+  // floating shapes
+  for(const s of animObjects.floatShapes){
+    s.mesh.position.y = s.baseY + Math.sin(t+s.ph)*0.3;
+    s.mesh.position.x += s.vx*dt; s.mesh.position.z += s.vz*dt;
+    if(s.mesh.position.x<-23||s.mesh.position.x>-9) s.vx*=-1;
+    if(s.mesh.position.z<-50||s.mesh.position.z>-40) s.vz*=-1;
+    s.mesh.rotation.y += s.rs*dt; s.mesh.rotation.x += s.rs*0.5*dt;
+  }
+  // coin hover + item pulse
+  for(const id in itemMeshes){
+    const rec=itemMeshes[id]; if(!rec.mesh.parent) continue;
+    rec.mesh.material.emissiveIntensity = Math.sin(t*2)*0.3+0.5;
+    if(rec.def.hovering){ rec.mesh.position.y=rec.baseY+Math.sin(t*2)*0.1; rec.mesh.rotation.y+=dt; }
+    else { rec.mesh.rotation.y+=dt*0.5; }
+  }
+  // server LEDs
+  for(const led of animObjects.serverLEDs){
+    led.acc+=dt;
+    if(led.acc>led.t){ led.acc=0; led.t=Math.random()*0.5+0.3; led.on=!led.on;
+      if(led.mesh) led.mesh.material.emissiveIntensity=led.on?1:0.1;
+      if(led.light) led.light.intensity=led.on?led.baseInt:0.05;
+    }
+  }
+
+  // photo developing near projector
+  if(has('photo') && room==='archive' && p.pos.distanceTo(new THREE.Vector3(-16,1.7,-16))<5
+     && w.photoRevealed<1){
+    w.photoRevealed=Math.min(1, w.photoRevealed+dt/5);
+    drawPhoto(animObjects.projectorCanvas, w.photoRevealed);
+    animObjects.projectorTex.needsUpdate=true;
+    if(w.photoRevealed>=1) hudMsg('The image resolves: SGT. R. KOVACS.',2500);
+  }
+
+  // mirror symbol (window held 5s)
+  if(mirrorHolding && room==='obs' && has('mirror')){
+    w.mirrorTimer+=dt;
+    if(w.mirrorTimer>=5){
+      animObjects.mirrorSymbol.visible=true;
+      if(!GameState.discovered.has('mirror_symbol')) discover('mirror_symbol');
+    }
+  } else if(room!=='obs'){ mirrorHolding=false; w.mirrorTimer=0; }
+
+  // morse from radio
+  if(has('radio')){
+    GameState.audio.morseNext-=dt;
+    if(GameState.audio.morseNext<=0){ playMorse(); GameState.audio.morseNext=20+Math.random()*20; }
+  }
+
+  // secrets
+  checkSecretsPerFrame(dt);
+
+  // crosshair / prompt
+  updateReticle();
+}
+
+function onRoomChange(room){
+  const names={entry:'ENTRY CHECKPOINT', ops:'OPERATIONS ROOM', server:'SERVER ROOM',
+    anomaly:'ANOMALY CHAMBER — ROOM 7', archive:'ARCHIVE', obs:'OBSERVATION DECK'};
+  const rn=$('roomName');
+  if(rn){ rn.textContent=names[room]||room.toUpperCase(); rn.style.opacity='1';
+    clearTimeout(rn._t); rn._t=setTimeout(()=>rn.style.opacity='0',3000); }
+  setRoomDrone(room);
+}
+
+function updateReticle(){
+  const tgt=findInteractable();
+  const dot=$('chDot');
+  if(tgt){
+    dot.setAttribute('fill','#d4a820');
+    const labels={pickup:'[E] PICK UP', map:'[E] EXAMINE MAP', terminal:'[E] USE TERMINAL',
+      clock:'[E] OBSERVE CLOCK', projector:'[E] USE PROJECTOR', window:'[E] USE WINDOW',
+      finallog:'[E] READ FINAL ENTRY'};
+    let txt=labels[tgt.type]||'[E] INTERACT';
+    if(tgt.type==='pickup'){ const d=ITEM_DEFS.find(x=>x.id===tgt.id); txt='[E] PICK UP — '+d.name; }
+    if(tgt.type==='pickup' && tgt.id==='logbook') txt='[E] PICK UP — Logbook  ([R] to read when held)';
+    setPrompt(txt);
+  } else {
+    dot.setAttribute('fill','#ffffff');
+    setPrompt(GameState.player.heldId==='logbook'?'[TAB/R] READ LOGBOOK':'');
+  }
+}
+
+// ===========================================================================
+// RENDER LOOP
+// ===========================================================================
+function render(){ renderer.render(scene,camera);
+  if((GameState.phase==='INVENTORY') && examineMesh){
+    examineMesh.rotation.y+=0.02; examineMesh.rotation.x+=0.008;
+    examineRenderer.render(examineScene,examineCam);
+  }
+}
+function gameLoop(timestamp){
+  try{
+    GameState.time.delta=Math.min((timestamp-lastTime)/1000, Config.DELTA_CAP);
+    lastTime=timestamp;
+    GameState.time.elapsed += GameState.time.delta;
+    if(GameState.phase==='PLAYING'){ processInput(); update(GameState.time.delta); }
+    render();
+  }catch(e){ console.error('Loop error:',e); }
+  requestAnimationFrame(gameLoop);
+}
+
+// ===========================================================================
+// INIT
+// ===========================================================================
+function initThree(){
+  const canvas=$('gameCanvas');
+  renderer=new THREE.WebGLRenderer({canvas:canvas,antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer.shadowMap.enabled=true;
+  renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x05060a);
+  scene.fog=new THREE.FogExp2(0x05060a, Config.FOG_DENSITY_NORMAL);
+
+  camera=new THREE.PerspectiveCamera(72, window.innerWidth/window.innerHeight, 0.05, 120);
+
+  scene.add(new THREE.AmbientLight(0x404048, 0.5));
+
+  raycaster=new THREE.Raycaster();
+
+  // flashlight attached to camera
+  flashlight=new THREE.SpotLight(0xffffff,0,18,Math.PI/8,0.3,1.2);
+  flashlight.castShadow=true;
+  flashTarget=new THREE.Object3D();
+  flashTarget.position.set(0,0,-1);
+  camera.add(flashlight); camera.add(flashTarget);
+  flashlight.position.set(0,0,0.1); flashlight.target=flashTarget;
+  scene.add(camera);
+
+  window.addEventListener('resize', ()=>{
+    camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth,window.innerHeight);
+  });
+}
+
+function bindUI(){
+  $('beginBtn').onclick=()=>{ initAudio(); startGame(); };
+  $('continueBtn').onclick=beginPlaying;
+  $('resumeBtn').onclick=resumeGame;
+  $('ctrlBtn').onclick=()=>{ const c=$('controlsBox'); c.classList.toggle('hidden'); };
+  $('quitBtn').onclick=quitToMenu;
+  $('restartBtn').onclick=restartGame;
+  $('termClose').onclick=closeReading;
+  $('readClose').onclick=closeReading;
+  $('readPrev').onclick=()=>{ if(GameState.world.logbookPage>0){GameState.world.logbookPage--; showLogPage();} };
+  $('readNext').onclick=()=>{ if(GameState.world.logbookPage<LOGBOOK_PAGES.length-1){GameState.world.logbookPage++; showLogPage();} };
+}
+
+function boot(){
+  GameState=freshState();
+  initThree();
+  resetWalkable();
+  buildWorld();
+  setupExamine();
+  initInput();
+  bindUI();
+  updateCodexCounter();
+  renderCodex();
+  applyPlayerToCamera();
+  GameState.phase='MENU';
+  hide('loading'); show('menu');
+  lastTime=performance.now();
+  requestAnimationFrame(gameLoop);
+}
+
+window.addEventListener('load', boot);
+
+})();
+</script>
+</body>
+</html>
