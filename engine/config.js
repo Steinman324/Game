@@ -16,35 +16,38 @@ export const Config = {
   PLAYER_START_AMMO: 50,
 
   // FOV
-  FOV: 0.66, // camera plane length (66 degree FOV)
+  FOV: 0.66,
 
   // Rendering
-  WALL_SHADE_SIDE: 0.7, // Y-side wall darkening factor
-  FLOOR_COLOR: '#1a1a1a',
-  CEILING_COLOR: '#111111',
-  MAX_DEPTH: 20,
+  WALL_SHADE_SIDE: 0.65,
+  MAX_DEPTH: 24,
 
   // Textures
   TEX_SIZE: 64,
 
   // Doors
-  DOOR_OPEN_SPEED: 2.0,
-  DOOR_OPEN_TIME: 3.0,    // seconds before auto-close
-  DOOR_TRIGGER_DIST: 1.5,
+  DOOR_OPEN_SPEED: 1.8,
+  DOOR_OPEN_TIME: 3.5,
+  DOOR_TRIGGER_DIST: 1.4,
 
   // Enemies
-  ENEMY_SPEED: 1.5,
+  ENEMY_SPEED: 1.4,
   ENEMY_ATTACK_RANGE: 1.2,
   ENEMY_ATTACK_DAMAGE: 10,
-  ENEMY_ATTACK_COOLDOWN: 1.0,
-  ENEMY_ALERT_DIST: 8.0,
-  ENEMY_LOSE_DIST: 12.0,
+  ENEMY_ATTACK_COOLDOWN: 1.2,
+  ENEMY_ALERT_DIST: 9.0,
+  ENEMY_LOSE_DIST: 14.0,
   ENEMY_HEALTH: 30,
-  ENEMY_SPRITE_SIZE: 0.7,
+  ENEMY_SPRITE_SCALE: 0.85,
 
   // Weapons
   GUN_DAMAGE: 25,
-  GUN_COOLDOWN: 0.4,
+  GUN_COOLDOWN: 0.38,
+
+  // Items
+  ITEM_PICKUP_DIST: 0.75,
+  ITEM_HEALTH_AMOUNT: 25,
+  ITEM_AMMO_AMOUNT: 20,
 
   // HUD
   MINIMAP_SCALE: 4,
@@ -63,7 +66,7 @@ export const Config = {
   // Cell types
   CELL_EMPTY: 0,
   CELL_WALL: 1,
-  CELL_DOOR: 2,
+  CELL_DOOR: 9,
 
   // Door states
   DOOR_CLOSED: 0,
@@ -76,7 +79,12 @@ export const Config = {
   ENEMY_ALERT: 1,
   ENEMY_CHASE: 2,
   ENEMY_ATTACK: 3,
-  ENEMY_DEAD: 4,
+  ENEMY_DYING: 4,
+  ENEMY_DEAD: 5,
+
+  // Item types
+  ITEM_HEALTH: 'health',
+  ITEM_AMMO: 'ammo',
 
   // Game states
   STATE_LOADING: 'LOADING',
