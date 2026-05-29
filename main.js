@@ -1,53 +1,57 @@
 import { Config } from './engine/config.js';
-import { initInput, InputState, consumeConfirm, consumePause } from './engine/input.js';
-import { createMapState, ITEM_SPAWNS, EXIT_POS } from './engine/map.js';
-import { createPlayer, updatePlayer } from './engine/player.js';
-import { createEnemies, updateEnemies, shootEnemies, buildEnemySprites } from './engine/enemies.js';
+import { initInput, InputState, flushMouseDX, consumeLog, consumePause, consumeConfirm } from './engine/input.js';
+import { createMapState, ANOMALY_SPAWNS, isLowSignal } from './engine/map.js';
+import { createPlayer, updatePlayer, displace } from './engine/player.js';
+import { createAnomalies, updateAnomalies, buildAnomalySprites, getNearestResonatorDist, getTargetedAnomaly } from './engine/anomalies.js';
 import { updateDoors, resetDoors } from './engine/doors.js';
-import { createItems, updateItems, buildItemSprites } from './engine/items.js';
-import { castWalls } from './engine/raycaster.js';
+import { castWalls, applyResonatorWarp } from './engine/raycaster.js';
 import { drawSprites } from './engine/sprites.js';
-import { drawHUD, drawMenu, drawPaused, drawGameOver, drawWin } from './engine/hud.js';
+import { drawHUD, drawMenu, drawDisplaced, drawWin } from './engine/hud.js';
+import { createLog, addScanEntry, addAmbientEntry, drawLog } from './engine/log.js';
+import { initAudio, updateDroneFrequency, playScanSuccess, playDisplace } from './engine/audio.js';
 import { loadTextures } from './assets/textures.js';
-import { initAudio, playSound } from './engine/audio.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 canvas.width = Config.WIDTH;
 canvas.height = Config.HEIGHT;
 
-let textures = null;
-let gameState = Config.STATE_LOADING;
-let player = null;
-let mapState = null;
-let enemies = null;
-let items = null;
-let gunFrame = 0;
-let gunTimer = 0;
-let hitFlash = 0;
-let pickupFlash = 0;
-let totalTime = 0;
+// ── GameState ─────────────────────────────────────────────────────────────
+const GS = {
+  phase: Config.STATE_LOADING,
+  player: null,
+  mapState: null,
+  anomalies: null,
+  log: null,
+  textures: null,
+  totalTime: 0,
+  displacedTimer: 0,
+  ambientLogTimer: 0,
+  scanTarget: null,
+  winTimer: 0,
+};
+
 let lastTime = 0;
 
 function resetGame() {
-  mapState = createMapState();
-  player = createPlayer();
-  enemies = createEnemies();
-  items = createItems(ITEM_SPAWNS);
-  resetDoors(mapState.doors);
-  gunFrame = 0;
-  gunTimer = 0;
-  hitFlash = 0;
-  pickupFlash = 0;
-  totalTime = 0;
+  GS.mapState = createMapState();
+  GS.player = createPlayer();
+  GS.anomalies = createAnomalies(ANOMALY_SPAWNS);
+  GS.log = createLog();
+  GS.totalTime = 0;
+  GS.displacedTimer = 0;
+  GS.ambientLogTimer = 40;
+  GS.scanTarget = null;
+  GS.winTimer = 0;
+  resetDoors(GS.mapState.doors);
 }
 
 function init() {
   initInput(canvas);
   initAudio();
-  textures = loadTextures();
+  GS.textures = loadTextures();
   resetGame();
-  gameState = Config.STATE_MENU;
+  GS.phase = Config.STATE_MENU;
   requestAnimationFrame(loop);
 }
 
@@ -60,135 +64,175 @@ function loop(timestamp) {
     update(delta);
     render();
   } catch (e) {
-    console.error('Game loop error:', e);
+    console.error('Loop error:', e);
   }
   requestAnimationFrame(loop);
 }
 
 function update(delta) {
-  switch (gameState) {
+  switch (GS.phase) {
+
     case Config.STATE_MENU:
       if (InputState.confirm) {
         consumeConfirm();
         resetGame();
-        gameState = Config.STATE_PLAYING;
+        GS.phase = Config.STATE_PLAYING;
       }
       break;
 
     case Config.STATE_PLAYING:
-      totalTime += delta;
+    case Config.STATE_SCANNING: {
+      GS.totalTime += delta;
 
-      if (InputState.pause) {
-        consumePause();
-        gameState = Config.STATE_PAUSED;
+      // Log toggle
+      if (InputState.logToggle) {
+        consumeLog();
+        GS.log.open = true;
+        GS.phase = Config.STATE_LOG_OPEN;
         break;
       }
 
-      updatePlayer(player, mapState, mapState.doors, delta, enemies);
-      updateEnemies(enemies, player, mapState, delta, playSound);
-      updateDoors(mapState.doors, delta, playSound);
-
-      // Items
-      const pickedUp = updateItems(items, player, delta, playSound);
-      if (pickedUp) {
-        pickupFlash = 1.0;
-        player._lastPickup = pickedUp;
-      }
-      if (pickupFlash > 0) pickupFlash = Math.max(0, pickupFlash - delta * 2.5);
-
-      // Shooting
-      if (player.shootTriggered) {
-        gunFrame = 1;
-        gunTimer = Config.GUN_COOLDOWN;
-        playSound('shoot');
-        shootEnemies(enemies, player, mapState, playSound);
-      }
-      if (gunTimer > 0) {
-        gunTimer -= delta;
-        if (gunTimer <= 0) gunFrame = 0;
+      // Escape to menu
+      if (InputState.pause) {
+        consumePause();
+        GS.phase = Config.STATE_MENU;
+        break;
       }
 
-      // Hit flash
-      const prevHealth = player._lastHealth !== undefined ? player._lastHealth : player.health;
-      if (player.health < prevHealth) hitFlash = 1.0;
-      player._lastHealth = player.health;
-      hitFlash = Math.max(0, hitFlash - delta * 2.8);
+      updatePlayer(GS.player, GS.mapState, delta);
+      updateAnomalies(GS.anomalies, GS.player, GS.mapState, delta, GS.totalTime, onScanComplete);
+      updateDoors(GS.mapState.doors, GS.player, delta);
 
-      // Win / death
-      const allDead = enemies.every(e => e.state >= Config.ENEMY_DYING);
-      const dx = player.x - EXIT_POS.x;
-      const dy = player.y - EXIT_POS.y;
-      if (allDead || dx * dx + dy * dy < 1.2) gameState = Config.STATE_WIN;
-      if (player.health <= 0) gameState = Config.STATE_GAME_OVER;
+      // Signal drain in low-signal zones
+      if (isLowSignal(GS.mapState, GS.player.x, GS.player.y)) {
+        GS.player.signal = Math.max(0, GS.player.signal - Config.SIGNAL_DRAIN_RATE * delta);
+      } else {
+        GS.player.signal = Math.min(Config.MAX_SIGNAL, GS.player.signal + 3 * delta);
+      }
+
+      if (GS.player.signal <= 0) {
+        playDisplace();
+        displace(GS.player);
+        GS.phase = Config.STATE_DISPLACED;
+        GS.displacedTimer = 0;
+        break;
+      }
+
+      // Scan hold tracking
+      GS.scanTarget = getTargetedAnomaly(GS.anomalies, GS.player, GS.mapState);
+      if (InputState.scanHeld && GS.scanTarget) {
+        InputState.scanHoldMs += delta * 1000;
+        GS.phase = Config.STATE_SCANNING;
+        GS.player.scanHeld = true;
+      } else {
+        if (!InputState.scanHeld) InputState.scanHoldMs = 0;
+        GS.phase = Config.STATE_PLAYING;
+        GS.player.scanHeld = false;
+      }
+
+      // Ambient log entries
+      GS.ambientLogTimer -= delta;
+      if (GS.ambientLogTimer <= 0 && GS.log.entries.length < 8) {
+        addAmbientEntry(GS.log, GS.log.entries.length);
+        GS.ambientLogTimer = 90 + Math.random() * 60;
+      }
+
+      // Audio
+      const resonDist = getNearestResonatorDist(GS.anomalies, GS.player);
+      updateDroneFrequency(resonDist);
+
+      // Win check — all non-resonator anomalies scanned
+      const scannableCount = GS.anomalies.filter(a => a.type !== Config.ANOM_RESONATOR).length;
+      const scannedCount   = GS.anomalies.filter(a => a.scanned).length;
+      if (scannedCount >= scannableCount && scannableCount > 0) {
+        GS.winTimer += delta;
+        if (GS.winTimer > 1.5) GS.phase = Config.STATE_WIN;
+      }
+      break;
+    }
+
+    case Config.STATE_LOG_OPEN:
+      if (InputState.logToggle || InputState.pause) {
+        consumeLog();
+        consumePause();
+        GS.log.open = false;
+        GS.phase = Config.STATE_PLAYING;
+      }
+      if (InputState.confirm) {
+        consumeConfirm();
+        GS.log.open = false;
+        GS.phase = Config.STATE_PLAYING;
+      }
       break;
 
-    case Config.STATE_PAUSED:
-      if (InputState.pause || InputState.confirm) {
-        if (InputState.pause) consumePause();
-        else consumeConfirm();
-        gameState = Config.STATE_PLAYING;
+    case Config.STATE_DISPLACED:
+      GS.displacedTimer += delta;
+      if (GS.displacedTimer >= Config.DISPLACED_DURATION) {
+        GS.phase = Config.STATE_PLAYING;
       }
       break;
 
-    case Config.STATE_GAME_OVER:
     case Config.STATE_WIN:
       if (InputState.confirm) {
         consumeConfirm();
         resetGame();
-        gameState = Config.STATE_MENU;
+        GS.phase = Config.STATE_MENU;
       }
       break;
   }
 }
 
-function render() {
-  switch (gameState) {
-    case Config.STATE_LOADING:
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, Config.WIDTH, Config.HEIGHT);
-      ctx.fillStyle = '#fff';
-      ctx.font = '20px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Loading...', Config.WIDTH / 2, Config.HEIGHT / 2);
-      ctx.textAlign = 'left';
-      break;
+function onScanComplete(anomaly) {
+  addScanEntry(GS.log, anomaly);
+  playScanSuccess();
+}
 
+function render() {
+  switch (GS.phase) {
     case Config.STATE_MENU:
       drawMenu(ctx);
       break;
 
-    case Config.STATE_PLAYING: {
-      castWalls(ctx, player, mapState, textures);
-      const sprites = [
-        ...buildEnemySprites(enemies, textures),
-        ...buildItemSprites(items, textures),
-      ];
-      drawSprites(ctx, player, sprites);
-      drawHUD(ctx, player, enemies, mapState, textures, gunFrame, hitFlash, pickupFlash);
+    case Config.STATE_PLAYING:
+    case Config.STATE_SCANNING: {
+      applyResonatorWarp(GS.anomalies, GS.player);
+      castWalls(ctx, GS.player, GS.mapState, GS.textures);
+      const sprites = buildAnomalySprites(GS.anomalies, GS.textures);
+      drawSprites(ctx, GS.player, sprites);
+      drawHUD(ctx, GS.player, GS.anomalies, GS.mapState,
+        GS.scanTarget, InputState.scanHoldMs);
       break;
     }
 
-    case Config.STATE_PAUSED: {
-      castWalls(ctx, player, mapState, textures);
-      const sprites = [
-        ...buildEnemySprites(enemies, textures),
-        ...buildItemSprites(items, textures),
-      ];
-      drawSprites(ctx, player, sprites);
-      drawHUD(ctx, player, enemies, mapState, textures, gunFrame, hitFlash, pickupFlash);
-      drawPaused(ctx);
+    case Config.STATE_LOG_OPEN: {
+      applyResonatorWarp(GS.anomalies, GS.player);
+      castWalls(ctx, GS.player, GS.mapState, GS.textures);
+      const sprites = buildAnomalySprites(GS.anomalies, GS.textures);
+      drawSprites(ctx, GS.player, sprites);
+      drawHUD(ctx, GS.player, GS.anomalies, GS.mapState, null, 0);
+      drawLog(ctx, GS.log);
       break;
     }
 
-    case Config.STATE_GAME_OVER:
-      castWalls(ctx, player, mapState, textures);
-      drawGameOver(ctx);
+    case Config.STATE_DISPLACED: {
+      applyResonatorWarp(GS.anomalies, GS.player);
+      castWalls(ctx, GS.player, GS.mapState, GS.textures);
+      const sprites2 = buildAnomalySprites(GS.anomalies, GS.textures);
+      drawSprites(ctx, GS.player, sprites2);
+      drawHUD(ctx, GS.player, GS.anomalies, GS.mapState, null, 0);
+      drawDisplaced(ctx, GS.displacedTimer / Config.DISPLACED_DURATION);
       break;
+    }
 
     case Config.STATE_WIN:
-      castWalls(ctx, player, mapState, textures);
+      applyResonatorWarp(GS.anomalies, GS.player);
+      castWalls(ctx, GS.player, GS.mapState, GS.textures);
       drawWin(ctx);
       break;
+
+    default:
+      ctx.fillStyle = '#060a0d';
+      ctx.fillRect(0, 0, Config.WIDTH, Config.HEIGHT);
   }
 }
 

@@ -1,148 +1,83 @@
 import { Config } from './config.js';
-import { InputState, flushMouseDX, consumeUse, consumeShoot } from './input.js';
-import { isWall, isDoor } from './map.js';
+import { InputState, flushMouseDX } from './input.js';
+import { isWall, ANCHOR_POINTS } from './map.js';
 
 export function createPlayer() {
   return {
-    x: Config.PLAYER_START_X,
-    y: Config.PLAYER_START_Y,
+    x: Config.PLAYER_START_X, y: Config.PLAYER_START_Y,
     angle: Config.PLAYER_START_ANGLE,
-    // Direction vector
     dirX: Math.cos(Config.PLAYER_START_ANGLE),
     dirY: Math.sin(Config.PLAYER_START_ANGLE),
-    // Camera plane (perpendicular to dir, length = FOV factor)
-    planeX: 0,
-    planeY: Config.FOV,
-    health: Config.PLAYER_MAX_HEALTH,
-    ammo: Config.PLAYER_START_AMMO,
-    gunCooldown: 0,
-    shootTriggered: false,
-    usedDoor: false,
-    bobTimer: 0,
-    bobAmount: 0,
-    stepSoundTimer: 0,
+    planeX: 0, planeY: Config.FOV,
+    signal: Config.MAX_SIGNAL,
+    anchorIdx: 0,
+    bobTimer: 0, bobAmount: 0,
+    isMoving: false, scanHeld: false,
   };
 }
 
 function rotate(player, angle) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const oldDirX = player.dirX;
-  player.dirX = player.dirX * cos - player.dirY * sin;
-  player.dirY = oldDirX * sin + player.dirY * cos;
-  const oldPlaneX = player.planeX;
-  player.planeX = player.planeX * cos - player.planeY * sin;
-  player.planeY = oldPlaneX * sin + player.planeY * cos;
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const dx = player.dirX, px = player.planeX;
+  player.dirX = dx * c - player.dirY * s;
+  player.dirY = dx * s + player.dirY * c;
+  player.planeX = px * c - player.planeY * s;
+  player.planeY = px * s + player.planeY * c;
   player.angle += angle;
 }
 
 function tryMove(player, mapState, nx, ny) {
   const r = Config.PLAYER_RADIUS;
-  // Try X movement
-  if (!isWall(mapState, nx + Math.sign(nx - player.x) * r, player.y)) {
-    player.x = nx;
-  }
-  // Try Y movement
-  if (!isWall(mapState, player.x, ny + Math.sign(ny - player.y) * r)) {
-    player.y = ny;
-  }
+  const sx = Math.sign(nx - player.x) || 1;
+  const sy = Math.sign(ny - player.y) || 1;
+  if (!isWall(mapState, nx + sx * r, player.y)) player.x = nx;
+  if (!isWall(mapState, player.x, ny + sy * r)) player.y = ny;
 }
 
-export function updatePlayer(player, mapState, doors, delta, enemies) {
-  if (player.health <= 0) return;
-
+export function updatePlayer(player, mapState, delta) {
   const mouseDX = flushMouseDX();
   const rot = mouseDX * Config.MOUSE_SENSITIVITY
-    + (InputState.turnRight ? 1 : 0) * Config.PLAYER_ROT_SPEED * delta
-    - (InputState.turnLeft ? 1 : 0) * Config.PLAYER_ROT_SPEED * delta;
+    + (InputState.turnLeft ? -1 : 0) * Config.PLAYER_ROT_SPEED * delta;
 
   if (rot !== 0) rotate(player, rot);
 
   const speed = Config.PLAYER_SPEED * delta;
-  let moveX = 0;
-  let moveY = 0;
+  let mx = 0, my = 0;
+  if (InputState.forward)     { mx += player.dirX * speed; my += player.dirY * speed; }
+  if (InputState.backward)    { mx -= player.dirX * speed; my -= player.dirY * speed; }
+  if (InputState.strafeLeft)  { mx += player.dirY * speed; my -= player.dirX * speed; }
+  if (InputState.strafeRight) { mx -= player.dirY * speed; my += player.dirX * speed; }
 
-  if (InputState.forward) {
-    moveX += player.dirX * speed;
-    moveY += player.dirY * speed;
-  }
-  if (InputState.backward) {
-    moveX -= player.dirX * speed;
-    moveY -= player.dirY * speed;
-  }
-  if (InputState.strafeLeft) {
-    moveX += player.dirY * speed;
-    moveY -= player.dirX * speed;
-  }
-  if (InputState.strafeRight) {
-    moveX -= player.dirY * speed;
-    moveY += player.dirX * speed;
-  }
-
-  if (moveX !== 0 || moveY !== 0) {
-    tryMove(player, mapState, player.x + moveX, player.y + moveY);
-    player.bobTimer += delta * 8;
-    player.bobAmount = Math.sin(player.bobTimer) * 4;
-    player.stepSoundTimer += delta;
+  player.isMoving = mx !== 0 || my !== 0;
+  if (player.isMoving) {
+    tryMove(player, mapState, player.x + mx, player.y + my);
+    player.bobTimer += delta * 7;
+    player.bobAmount = Math.sin(player.bobTimer) * 3;
   } else {
-    player.bobAmount *= 0.85;
+    player.bobAmount *= 0.88;
   }
 
-  // Gun cooldown
-  if (player.gunCooldown > 0) player.gunCooldown -= delta;
-
-  // Shoot
-  player.shootTriggered = false;
-  if (InputState.shoot && player.gunCooldown <= 0 && player.ammo > 0) {
-    player.shootTriggered = true;
-    player.gunCooldown = Config.GUN_COOLDOWN;
-    player.ammo--;
-    consumeShoot();
-  }
-
-  // Use door
-  player.usedDoor = false;
-  if (InputState.use) {
-    consumeUse();
-    tryUseDoor(player, mapState, doors);
-    player.usedDoor = true;
-  }
-
-  // Auto-trigger nearby doors
-  autoTriggerDoors(player, doors);
-}
-
-function tryUseDoor(player, mapState, doors) {
-  // Check cell in front of player
-  const fx = Math.floor(player.x + player.dirX * 1.0);
-  const fy = Math.floor(player.y + player.dirY * 1.0);
-  const key = `${fx},${fy}`;
-  if (doors[key]) {
-    triggerDoor(doors[key]);
-  }
-}
-
-function autoTriggerDoors(player, doors) {
-  for (const key in doors) {
-    const door = doors[key];
-    const dx = door.x + 0.5 - player.x;
-    const dy = door.y + 0.5 - player.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < Config.DOOR_TRIGGER_DIST) {
-      if (door.state === Config.DOOR_CLOSED) {
-        door.state = Config.DOOR_OPENING;
-      }
+  // Update anchor (nearest anchor point)
+  if (player.signal > 60) {
+    let bestDist = Infinity, bestIdx = 0;
+    for (let i = 0; i < ANCHOR_POINTS.length; i++) {
+      const ap = ANCHOR_POINTS[i];
+      const d = (ap.x - player.x) ** 2 + (ap.y - player.y) ** 2;
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
     }
+    if (bestDist < 4) player.anchorIdx = bestIdx;
   }
 }
 
-function triggerDoor(door) {
-  if (door.state === Config.DOOR_CLOSED || door.state === Config.DOOR_CLOSING) {
-    door.state = Config.DOOR_OPENING;
-  }
+export function displace(player) {
+  const ap = ANCHOR_POINTS[player.anchorIdx];
+  player.x = ap.x; player.y = ap.y;
+  player.signal = Config.SIGNAL_RESTORE_ON_DISPLACE;
 }
 
-export function damagePlayer(player, amount, audioFn) {
-  player.health = Math.max(0, player.health - amount);
-  if (audioFn) audioFn('hurt');
+export function getAimDot(player, tx, ty) {
+  const dx = tx - player.x, dy = ty - player.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 0.001) return 0;
+  return (dx / dist) * player.dirX + (dy / dist) * player.dirY;
 }
