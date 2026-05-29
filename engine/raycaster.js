@@ -67,7 +67,7 @@ export function castWalls(ctx, player, mapState, textures) {
     let sdx = rayDirX < 0 ? (player.x - mapX) * ddx : (mapX + 1 - player.x) * ddx;
     let sdy = rayDirY < 0 ? (player.y - mapY) * ddy : (mapY + 1 - player.y) * ddy;
 
-    let side = 0, cellType = 0, perpWallDist = 0, doorHit = false, doorWallX = 0;
+    let side = 0, cellType = 1, perpWallDist = Config.MAX_DEPTH, doorHit = false, doorWallX = 0;
 
     for (let depth = 0; depth < Config.MAX_DEPTH; depth++) {
       if (sdx < sdy) { sdx += ddx; mapX += stepX; side = 0; }
@@ -82,13 +82,16 @@ export function castWalls(ctx, player, mapState, textures) {
       cellType = mapState.grid[mapY][mapX];
 
       if (cellType === 9) {
+        // Door: sample at midpoint of cell (classic Wolf3D technique)
         const halfDist = side === 0 ? sdx - ddx * 0.5 : sdy - ddy * 0.5;
+        const hitX = player.x + halfDist * rayDirX;
+        const hitY = player.y + halfDist * rayDirY;
         let wx = side === 0
-          ? (player.y + halfDist * rayDirY) - Math.floor(player.y + halfDist * rayDirY)
-          : (player.x + halfDist * rayDirX) - Math.floor(player.x + halfDist * rayDirX);
+          ? hitY - Math.floor(hitY)
+          : hitX - Math.floor(hitX);
         const door = mapState.doors[`${mapX},${mapY}`];
         const dOffset = door ? door.offset : 0;
-        if (wx < dOffset) continue;
+        if (wx < dOffset) continue; // ray passes through open gap
         doorHit = true; doorWallX = wx;
         perpWallDist = halfDist; break;
       }
@@ -116,8 +119,9 @@ export function castWalls(ctx, player, mapState, textures) {
     else if (side === 0) { wallX = player.y + perpWallDist * rayDirY; wallX -= Math.floor(wallX); }
     else { wallX = player.x + perpWallDist * rayDirX; wallX -= Math.floor(wallX); }
 
-    const texIdx = doorHit ? 0 : Math.min(cellType, textures.walls.length - 1);
-    const texData = doorHit ? textures.door : textures.walls[texIdx];
+    const texData = doorHit
+      ? textures.door
+      : textures.walls[Math.min(cellType, textures.walls.length - 1)];
     if (!texData) { zBuffer[col] = 1e30; continue; }
 
     const texW2 = Config.TEX_SIZE;
