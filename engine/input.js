@@ -1,59 +1,61 @@
 export const InputState = {
-  forward: false,
-  backward: false,
-  strafeLeft: false,
+  forward:     false,
+  backward:    false,
+  strafeLeft:  false,
   strafeRight: false,
-  turnLeft: false,
-  turnRight: false,
-  shoot: false,
-  use: false,          // open door
-  pause: false,
-  confirm: false,      // menu/gameover confirm
-  mouseDX: 0,
+  turnLeft:    false,
+  turnRight:   false,
+  scanHeld:    false,     // [E] held
+  logToggle:   false,     // [L] pressed
+  confirm:     false,     // [Enter]
+  escape:      false,     // [Esc]
+  mouseDX:     0,
   pointerLocked: false,
-  _shootConsumed: false,
-  _useConsumed: false,
-  _pauseConsumed: false,
+
+  _logConsumed:     false,
   _confirmConsumed: false,
+  _escapeConsumed:  false,
 };
 
 let _canvas = null;
 
 function onKeyDown(e) {
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp':    InputState.forward = true; break;
-    case 'KeyS': case 'ArrowDown':  InputState.backward = true; break;
-    case 'KeyA':                    InputState.strafeLeft = true; break;
-    case 'KeyD':                    InputState.strafeRight = true; break;
-    case 'ArrowLeft':               InputState.turnLeft = true; break;
-    case 'ArrowRight':              InputState.turnRight = true; break;
-    case 'Space': case 'KeyE':
-      if (!InputState._useConsumed) { InputState.use = true; }
+    case 'KeyW': case 'ArrowUp':    InputState.forward      = true; break;
+    case 'KeyS': case 'ArrowDown':  InputState.backward     = true; break;
+    case 'KeyA':                    InputState.strafeLeft   = true; break;
+    case 'KeyD':                    InputState.strafeRight  = true; break;
+    case 'ArrowLeft':               InputState.turnLeft     = true; break;
+    case 'ArrowRight':              InputState.turnRight    = true; break;
+    case 'KeyE':                    InputState.scanHeld     = true; break;
+    case 'KeyL':
+      if (!InputState._logConsumed) InputState.logToggle = true;
       break;
     case 'Escape':
-      if (!InputState._pauseConsumed) { InputState.pause = true; }
+      if (!InputState._escapeConsumed) InputState.escape = true;
       break;
     case 'Enter':
-      if (!InputState._confirmConsumed) { InputState.confirm = true; }
+      if (!InputState._confirmConsumed) InputState.confirm = true;
       break;
   }
 }
 
 function onKeyUp(e) {
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp':    InputState.forward = false; break;
-    case 'KeyS': case 'ArrowDown':  InputState.backward = false; break;
-    case 'KeyA':                    InputState.strafeLeft = false; break;
+    case 'KeyW': case 'ArrowUp':    InputState.forward     = false; break;
+    case 'KeyS': case 'ArrowDown':  InputState.backward    = false; break;
+    case 'KeyA':                    InputState.strafeLeft  = false; break;
     case 'KeyD':                    InputState.strafeRight = false; break;
-    case 'ArrowLeft':               InputState.turnLeft = false; break;
-    case 'ArrowRight':              InputState.turnRight = false; break;
-    case 'Space': case 'KeyE':
-      InputState.use = false;
-      InputState._useConsumed = false;
+    case 'ArrowLeft':               InputState.turnLeft    = false; break;
+    case 'ArrowRight':              InputState.turnRight   = false; break;
+    case 'KeyE':                    InputState.scanHeld    = false; break;
+    case 'KeyL':
+      InputState.logToggle = false;
+      InputState._logConsumed = false;
       break;
     case 'Escape':
-      InputState.pause = false;
-      InputState._pauseConsumed = false;
+      InputState.escape = false;
+      InputState._escapeConsumed = false;
       break;
     case 'Enter':
       InputState.confirm = false;
@@ -63,25 +65,11 @@ function onKeyUp(e) {
 }
 
 function onMouseDown(e) {
-  if (e.button === 0 && !InputState._shootConsumed) {
-    InputState.shoot = true;
-  }
-  if (_canvas && !InputState.pointerLocked) {
-    _canvas.requestPointerLock();
-  }
-}
-
-function onMouseUp(e) {
-  if (e.button === 0) {
-    InputState.shoot = false;
-    InputState._shootConsumed = false;
-  }
+  if (_canvas && !InputState.pointerLocked) _canvas.requestPointerLock();
 }
 
 function onMouseMove(e) {
-  if (InputState.pointerLocked) {
-    InputState.mouseDX += e.movementX;
-  }
+  if (InputState.pointerLocked) InputState.mouseDX += e.movementX;
 }
 
 function onPointerLockChange() {
@@ -93,10 +81,8 @@ export function initInput(canvas) {
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   document.addEventListener('mousedown', onMouseDown);
-  document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('pointerlockchange', onPointerLockChange);
-
   canvas.addEventListener('click', () => {
     if (!InputState.pointerLocked) canvas.requestPointerLock();
   });
@@ -106,29 +92,8 @@ export function removeInput() {
   document.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('keyup', onKeyUp);
   document.removeEventListener('mousedown', onMouseDown);
-  document.removeEventListener('mouseup', onMouseUp);
   document.removeEventListener('mousemove', onMouseMove);
   document.removeEventListener('pointerlockchange', onPointerLockChange);
-}
-
-export function consumeUse() {
-  InputState._useConsumed = true;
-  InputState.use = false;
-}
-
-export function consumeShoot() {
-  InputState._shootConsumed = true;
-  InputState.shoot = false;
-}
-
-export function consumePause() {
-  InputState._pauseConsumed = true;
-  InputState.pause = false;
-}
-
-export function consumeConfirm() {
-  InputState._confirmConsumed = true;
-  InputState.confirm = false;
 }
 
 export function flushMouseDX() {
@@ -136,3 +101,7 @@ export function flushMouseDX() {
   InputState.mouseDX = 0;
   return dx;
 }
+
+export function consumeLogToggle()  { InputState._logConsumed = true;     InputState.logToggle = false; }
+export function consumeConfirm()    { InputState._confirmConsumed = true; InputState.confirm   = false; }
+export function consumeEscape()     { InputState._escapeConsumed = true;  InputState.escape    = false; }

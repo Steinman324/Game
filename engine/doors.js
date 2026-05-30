@@ -1,14 +1,21 @@
 import { Config } from './config.js';
 
-export function updateDoors(doors, delta, playSound) {
+export function updateDoors(mapState, player, delta) {
+  const doors = mapState.doors;
   for (const key in doors) {
     const door = doors[key];
+
+    // Auto-open when player is close
+    if (door.state === Config.DOOR_CLOSED) {
+      const dx = door.x + 0.5 - player.x;
+      const dy = door.y + 0.5 - player.y;
+      if (dx * dx + dy * dy < Config.DOOR_TRIGGER_RANGE * Config.DOOR_TRIGGER_RANGE) {
+        door.state = Config.DOOR_OPENING;
+      }
+    }
+
     switch (door.state) {
       case Config.DOOR_OPENING:
-        if (!door.soundPlayed) {
-          if (playSound) playSound('door');
-          door.soundPlayed = true;
-        }
         door.offset += Config.DOOR_OPEN_SPEED * delta;
         if (door.offset >= 1.0) {
           door.offset = 1.0;
@@ -17,36 +24,35 @@ export function updateDoors(doors, delta, playSound) {
         }
         break;
 
-      case Config.DOOR_OPEN:
-        door.timer -= delta;
-        if (door.timer <= 0) {
-          door.state = Config.DOOR_CLOSING;
-          door.soundPlayed = false;
+      case Config.DOOR_OPEN: {
+        // Keep open while player is nearby
+        const dx = door.x + 0.5 - player.x;
+        const dy = door.y + 0.5 - player.y;
+        if (dx * dx + dy * dy < (Config.DOOR_TRIGGER_RANGE * 1.5) ** 2) {
+          door.timer = Config.DOOR_OPEN_TIME;
+        } else {
+          door.timer -= delta;
+          if (door.timer <= 0) door.state = Config.DOOR_CLOSING;
         }
         break;
+      }
 
       case Config.DOOR_CLOSING:
-        if (!door.soundPlayed) {
-          if (playSound) playSound('door');
-          door.soundPlayed = true;
-        }
         door.offset -= Config.DOOR_OPEN_SPEED * delta;
         if (door.offset <= 0) {
           door.offset = 0;
           door.state = Config.DOOR_CLOSED;
-          door.soundPlayed = false;
         }
         break;
     }
   }
 }
 
-export function resetDoors(doors) {
-  for (const key in doors) {
-    const door = doors[key];
-    door.state = Config.DOOR_CLOSED;
-    door.offset = 0;
-    door.timer = 0;
-    door.soundPlayed = false;
+export function resetDoors(mapState) {
+  for (const key in mapState.doors) {
+    const d = mapState.doors[key];
+    d.state = Config.DOOR_CLOSED;
+    d.offset = 0;
+    d.timer = 0;
   }
 }

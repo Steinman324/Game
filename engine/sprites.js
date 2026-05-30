@@ -1,84 +1,69 @@
 import { Config } from './config.js';
-import { zBuffer } from './raycaster.js';
+import { frameBuf, zBuffer } from './raycaster.js';
 
-export function drawSprites(ctx, player, sprites) {
+const W = Config.CANVAS_WIDTH;
+const H = Config.CANVAS_HEIGHT;
+const T = Config.TEX_SIZE;
+
+export function drawSpritesToBuffer(player, sprites) {
   if (!sprites || sprites.length === 0) return;
 
-  const W = Config.WIDTH;
-  const H = Config.HEIGHT;
+  // Compute camera-space depth for each sprite
+  const invDet = 1 / (player.planeX * player.dirY - player.dirX * player.planeY);
 
-  // Translate relative to player
-  const translated = sprites.map(s => {
+  const projected = [];
+  for (const s of sprites) {
     const dx = s.x - player.x;
     const dy = s.y - player.y;
-    return { ...s, dx, dy, distSq: dx * dx + dy * dy };
-  });
+    const tx = invDet * ( player.dirY * dx  - player.dirX * dy);
+    const ty = invDet * (-player.planeY * dx + player.planeX * dy);
+    if (ty <= 0.05) continue; // behind or on camera plane
+    projected.push({ ...s, transformX: tx, transformY: ty, distSq: dx * dx + dy * dy });
+  }
 
-  // Back-to-front sort
-  translated.sort((a, b) => b.distSq - a.distSq);
+  // Sort far to near (painter's algorithm; Z-buffer handles per-pixel occlusion)
+  projected.sort((a, b) => b.distSq - a.distSq);
 
-  const invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+  for (const s of projected) {
+    const { transformX, transformY, distSq } = s;
+    const screenX = Math.floor(W / 2 * (1 + transformX / transformY));
+    const scale = s.scale ?? 1.0;
+    const sH = Math.abs(Math.floor(H / transformY)) * scale;
+    const sW = sH;
 
-  for (const sprite of translated) {
-    const transformX = invDet * (player.dirY * sprite.dx - player.dirX * sprite.dy);
-    const transformY = invDet * (-player.planeY * sprite.dx + player.planeX * sprite.dy);
+    const drawStartY = Math.max(0,     Math.floor(H / 2 - sH / 2));
+    const drawEndY   = Math.min(H - 1, Math.floor(H / 2 + sH / 2));
+    const drawStartX = Math.max(0,     Math.floor(screenX - sW / 2));
+    const drawEndX   = Math.min(W - 1, Math.floor(screenX + sW / 2));
+    if (drawEndX < drawStartX || drawEndY < drawStartY) continue;
 
-    if (transformY <= 0.05) continue;
-
-    const spriteScreenX = Math.floor((W / 2) * (1 + transformX / transformY));
-
-    const scale = sprite.scale || 1.0;
-    const spriteHeight = Math.abs(Math.floor(H / transformY)) * scale;
-    const spriteWidth  = spriteHeight;
-
-    // Vertical bob for items
-    const bobPx = sprite.bobOffset ? Math.round(sprite.bobOffset * spriteHeight) : 0;
-
-    const drawStartY = Math.max(0, Math.floor(H / 2 - spriteHeight / 2) + bobPx);
-    const drawEndY   = Math.min(H - 1, Math.floor(H / 2 + spriteHeight / 2) + bobPx);
-    const drawStartX = Math.max(0, Math.floor(spriteScreenX - spriteWidth / 2));
-    const drawEndX   = Math.min(W - 1, Math.floor(spriteScreenX + spriteWidth / 2));
-
-    const stripW = drawEndX - drawStartX + 1;
-    const stripH = drawEndY - drawStartY + 1;
-    if (stripW <= 0 || stripH <= 0) continue;
-
-    const texData = sprite.texture;
+    const texData = s.texture;
     if (!texData) continue;
 
-    const texW = Config.TEX_SIZE;
-    const texH = Config.TEX_SIZE;
-    const dist = Math.sqrt(sprite.distSq);
-    const distShade = Math.max(0.18, 1 - dist / Config.MAX_DEPTH * 0.82);
+    const dist    = Math.sqrt(distSq);
+    const distSh  = Math.max(0.1, 1 - dist / Config.MAX_DEPTH * 0.85);
+    const alpha   = s.alpha ?? 1.0;
 
-    const imageData = ctx.createImageData(stripW, stripH);
-    const data = imageData.data;
-    let hasVisible = false;
+    for (let sx = drawStartX; sx <= drawEndX; sx++) {
+      if (zBuffer[sx] < transformY) continue; // wall in front
 
-    for (let sx = 0; sx < stripW; sx++) {
-      const screenX = drawStartX + sx;
-      if (zBuffer[screenX] < transformY) continue;
+      const texXfrac = (sx - (screenX - sW / 2)) / sW;
+      const texX = Math.max(0, Math.min(T - 1, Math.floor(texXfrac * T)));
 
-      const realTexX = Math.floor(((screenX - (spriteScreenX - spriteWidth / 2)) / spriteWidth) * texW);
-      if (realTexX < 0 || realTexX >= texW) continue;
+      for (let sy = drawStartY; sy <= drawEndY; sy++) {
+        const texYfrac = (sy - (H / 2 - sH / 2)) / sH;
+        const texY = Math.max(0, Math.min(T - 1, Math.floor(texYfrac * T)));
 
-      for (let sy = 0; sy < stripH; sy++) {
-        const screenY = drawStartY + sy - bobPx;
-        const realTexY = Math.floor(((screenY - (H / 2 - spriteHeight / 2)) / spriteHeight) * texH);
-        if (realTexY < 0 || realTexY >= texH) continue;
+        const src = (texY * T + texX) * 4;
+        if (texData.data[src + 3] < 32) continue; // transparent pixel
 
-        const srcIdx = (realTexY * texW + realTexX) * 4;
-        if (texData.data[srcIdx + 3] < 128) continue;
-
-        hasVisible = true;
-        const dstIdx = (sy * stripW + sx) * 4;
-        data[dstIdx]   = texData.data[srcIdx]   * distShade;
-        data[dstIdx+1] = texData.data[srcIdx+1] * distShade;
-        data[dstIdx+2] = texData.data[srcIdx+2] * distShade;
-        data[dstIdx+3] = texData.data[srcIdx+3];
+        const a = (texData.data[src + 3] / 255) * alpha;
+        const dst = (sy * W + sx) * 4;
+        frameBuf[dst]   = Math.floor(frameBuf[dst]   * (1 - a) + texData.data[src]   * distSh * a);
+        frameBuf[dst+1] = Math.floor(frameBuf[dst+1] * (1 - a) + texData.data[src+1] * distSh * a);
+        frameBuf[dst+2] = Math.floor(frameBuf[dst+2] * (1 - a) + texData.data[src+2] * distSh * a);
+        frameBuf[dst+3] = 255;
       }
     }
-
-    if (hasVisible) ctx.putImageData(imageData, drawStartX, drawStartY);
   }
 }
